@@ -1,0 +1,28 @@
+# Build output
+/cav1ar
+/dist/
+
+# Video files, so test media never ends up in the repository
+*.mkv
+*.mp4
+*.mov
+*.avi
+*.webm
+*.m4v
+*.ts
+*.m2ts
+*.mts
+*.mpg
+*.mpeg
+*.wmv
+*.flv
+*.vob
+*.3gp
+*.ogv
+*.y4m
+
+# Editors and OS clutter
+.idea/
+.vscode/
+*.swp
+.DS_Store
