@@ -48,8 +48,15 @@ func (m Model) render() string {
 }
 
 func (m Model) header() string {
-	left := m.st.logo.Render("cav1ar") + " " + m.st.dim.Render(m.settings.Summary())
-	if n := len(m.settings.Watch); n > 0 && m.watcher.Active() {
+	left := m.st.logo.Render("cav1ar") + " "
+	switch {
+	case m.lost:
+		left += m.st.badText.Render("lost the daemon; reopen cav1ar") + "  "
+	case m.queue.Daemon():
+		left += m.st.okText.Render("daemon") + "  "
+	}
+	left += m.st.dim.Render(m.settings.Summary())
+	if n := len(m.settings.Watch); n > 0 && m.queue.Watching() {
 		left += "  " + m.st.okText.Render(fmt.Sprintf("watching %d %s", n, plural(n, "folder", "folders")))
 	} else if n > 0 {
 		left += "  " + m.st.dim.Render("folders watched by another cav1ar")

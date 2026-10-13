@@ -15,6 +15,7 @@ import (
 
 	"github.com/haydenkz/cav1ar/internal/config"
 	"github.com/haydenkz/cav1ar/internal/encode"
+	"github.com/haydenkz/cav1ar/internal/remote"
 	"github.com/haydenkz/cav1ar/internal/tui"
 )
 
@@ -32,6 +33,7 @@ func main() {
 	daemon := flag.Bool("daemon", false, "run without the UI, logging to stdout; follows the saved settings as they change")
 	dryRun := flag.Bool("dry-run", false, "say what would be done to the files given, or in the watched folders, and exit")
 	retryFailed := flag.Bool("retry-failed", false, "in watched folders, retry videos whose jobs failed before")
+	local := flag.Bool("local", false, "open the UI with a queue of its own, even when a daemon is running")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Func("encoder", "video encoder: cpu, nvidia or vaapi (default \""+string(saved.Encoder)+"\")",
 		func(v string) error { settings.Encoder = encode.Encoder(v); return nil })
@@ -72,6 +74,7 @@ func main() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "usage: cav1ar [flags] [file or folder...]\n\n")
 		fmt.Fprintf(out, "Opens the encoder UI, queueing the files given and every video in the folders.\n")
+		fmt.Fprintf(out, "When a cav1ar daemon is running, the UI shows and controls its queue instead.\n")
 		fmt.Fprintf(out, "Settings saved in the UI are the defaults for these flags.\n\n")
 		flag.PrintDefaults()
 	}
@@ -105,6 +108,15 @@ func main() {
 		}
 		return
 	}
+	if !*daemon && !*local {
+		if c, err := remote.Dial(); err == nil {
+			cancel()
+			if err := runAttached(c, flag.Args()); err != nil {
+				fail(1, "%v", err)
+			}
+			return
+		}
+	}
 	q := encode.NewQueue(ctx, settings)
 	w := encode.Watch(ctx, q, watchState, *retryFailed)
 	for _, arg := range flag.Args() {
@@ -116,7 +128,7 @@ func main() {
 	if *daemon {
 		err = runDaemon(ctx, q, w, len(flag.Args()) > 0)
 	} else {
-		_, err = tea.NewProgram(tui.New(q, w)).Run()
+		_, err = tea.NewProgram(tui.New(tui.Local(q, w))).Run()
 	}
 	cancel()
 	q.Close()
@@ -128,8 +140,27 @@ func main() {
 	}
 }
 
+// runAttached opens the UI on a daemon's queue, adding the files given to it.
+// The daemon's settings apply, so flags that change them are refused.
+func runAttached(c *remote.Client, paths []string) error {
+	defer c.Close()
+	var set []string
+	flag.Visit(func(f *flag.Flag) { set = append(set, "-"+f.Name) })
+	if len(set) > 0 {
+		return fmt.Errorf("a cav1ar daemon is running, and the UI shows its queue with its settings, so %s "+
+			"can't apply; leave it out, or add -local to encode with a queue of the UI's own", strings.Join(set, " "))
+	}
+	for _, path := range paths {
+		if err := add(c, path); err != nil {
+			return err
+		}
+	}
+	_, err := tea.NewProgram(tui.New(c)).Run()
+	return err
+}
+
 // add queues a file, or every video in a folder and its subfolders.
-func add(q *encode.Queue, path string) error {
+func add(q interface{ Add(string) }, path string) error {
 	if fi, err := os.Stat(path); err != nil || !fi.IsDir() {
 		q.Add(path) // a missing file fails visibly in the queue
 		return nil

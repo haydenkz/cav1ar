@@ -121,6 +121,13 @@ func (q *Queue) SetPaused(paused bool) {
 	q.dispatchLocked()
 }
 
+// Paused reports whether the queue is paused.
+func (q *Queue) Paused() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.paused
+}
+
 // Jobs returns a snapshot of every job, in the order they were added.
 func (q *Queue) Jobs() []Job {
 	q.mu.Lock()
