@@ -42,7 +42,8 @@ func (s State) Finished() bool { return s >= Done }
 type Job struct {
 	ID     int
 	Input  string
-	Output string
+	Output string // where the result goes, once decided; the same as Input when nothing needed doing
+	Action Action // what the job decided the file needs, once it has
 	State  State
 
 	Progress float64       // 0..1; stays 0 when Duration is unknown
@@ -90,8 +91,8 @@ type Event struct {
 
 // updates is how a running encode reports back to the queue.
 type updates struct {
-	output   func(path string) // where the encode is being written, once decided
-	started  func(*os.Process) // the encoder process, so pausing can suspend it
+	planned  func(Action, string) // what the job will do, and where the result will go
+	started  func(*os.Process)    // the encoder process, so pausing can suspend it
 	progress func(progress)
 	log      func(line string)
 	note     func(note string) // sets Job.Note

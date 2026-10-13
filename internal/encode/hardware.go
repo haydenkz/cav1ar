@@ -3,9 +3,11 @@ package encode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -101,21 +103,81 @@ func CheckEncoder(e Encoder) error {
 	return errors.New("unknown encoder " + strconv.Quote(string(e)))
 }
 
-// videoArgs are the ffmpeg options that encode the video with s.Encoder.
-// Quality and speed are mapped onto each encoder's own scale.
-func videoArgs(s Settings) (beforeInput, afterInput []string) {
+// videoArgs are the ffmpeg options that encode v with s.Encoder at width x
+// height. Quality and speed are mapped onto each encoder's own scale.
+// hwDecode decodes on the GPU as well, which only the NVIDIA encoder does.
+func videoArgs(s Settings, v streamInfo, width, height int, hwDecode bool) (beforeInput, afterInput []string) {
+	scale := width != v.Width || height != v.Height
+	var filters []string
 	switch s.Encoder {
 	case EncoderNVIDIA:
-		// NVENC's quality scale matches CRF; its presets run p1 (fastest) to p7.
-		preset := 7 - (s.Preset*6+6)/13
-		return nil, []string{"-c:v", "av1_nvenc", "-preset", "p" + strconv.Itoa(preset), "-tune", "hq",
-			"-rc", "vbr", "-cq", strconv.Itoa(s.CRF), "-b:v", "0"}
+		if hwDecode {
+			beforeInput = []string{"-hwaccel", "cuda", "-hwaccel_output_format", "cuda"}
+			if v.Interlaced() {
+				filters = append(filters, "yadif_cuda=deint=interlaced")
+			}
+			filters = append(filters, fmt.Sprintf("scale_cuda=%d:%d:format=p010le", width, height))
+		} else {
+			filters = append(cpuFilters(v, width, height, scale), "format=p010le")
+		}
+		// NVENC's quality scale matches CRF. The rate cap only bites on
+		// pathological scenes, such as film grain or confetti.
+		maxRate := nvencMaxRate(resolution(width, height))
+		afterInput = []string{"-c:v", "av1_nvenc", "-preset", "p" + strconv.Itoa(s.NVENCPreset), "-tune", "hq",
+			"-rc", "vbr", "-cq", strconv.Itoa(s.CRF), "-b:v", "0",
+			"-maxrate", strconv.Itoa(maxRate) + "M", "-bufsize", strconv.Itoa(2*maxRate) + "M",
+			"-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1", "-g", "240"}
 	case EncoderVAAPI:
 		// Constant quality on AV1's 0–255 quantizer scale, about 4× CRF.
 		// Uploading as nv12 or p010 keeps 10-bit sources 10-bit.
-		return []string{"-vaapi_device", detect().vaapiDevice},
-			[]string{"-vf", "format=nv12|p010,hwupload", "-c:v", "av1_vaapi",
-				"-rc_mode", "CQP", "-global_quality", strconv.Itoa(s.CRF * 4)}
+		beforeInput = []string{"-vaapi_device", detect().vaapiDevice}
+		filters = append(cpuFilters(v, width, height, false), "format=nv12|p010", "hwupload")
+		if scale {
+			filters = append(filters, fmt.Sprintf("scale_vaapi=w=%d:h=%d", width, height))
+		}
+		afterInput = []string{"-c:v", "av1_vaapi", "-rc_mode", "CQP", "-global_quality", strconv.Itoa(s.CRF * 4)}
+	default:
+		filters = cpuFilters(v, width, height, scale)
+		afterInput = []string{"-c:v", "libsvtav1", "-preset", strconv.Itoa(s.Preset), "-crf", strconv.Itoa(s.CRF)}
 	}
-	return nil, []string{"-c:v", "libsvtav1", "-preset", strconv.Itoa(s.Preset), "-crf", strconv.Itoa(s.CRF)}
+	if len(filters) > 0 {
+		afterInput = append([]string{"-vf", strings.Join(filters, ",")}, afterInput...)
+	}
+	// Carry the colour description over, so HDR and old SD video still
+	// play with the right colours.
+	for _, c := range []struct{ opt, val string }{
+		{"-color_primaries", v.ColorPrimaries}, {"-color_trc", v.ColorTrc}, {"-colorspace", v.ColorSpace},
+	} {
+		if c.val != "" && c.val != "unknown" && c.val != "reserved" {
+			afterInput = append(afterInput, c.opt, c.val)
+		}
+	}
+	return beforeInput, afterInput
+}
+
+// cpuFilters deinterlace and scale on the CPU.
+func cpuFilters(v streamInfo, width, height int, scale bool) []string {
+	var filters []string
+	if v.Interlaced() {
+		filters = append(filters, "bwdif=deint=interlaced")
+	}
+	if scale {
+		filters = append(filters, fmt.Sprintf("scale=%d:%d:flags=lanczos", width, height))
+	}
+	return filters
+}
+
+// nvencMaxRate is the bitrate cap for NVIDIA encodes, in Mbit/s.
+func nvencMaxRate(res string) int {
+	switch res {
+	case "2160p":
+		return 30
+	case "1440p":
+		return 20
+	case "1080p":
+		return 12
+	case "720p":
+		return 8
+	}
+	return 4
 }

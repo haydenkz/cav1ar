@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -66,13 +67,17 @@ func logEvent(ev encode.Event, state map[int]encode.State) {
 	case encode.Queued:
 		log.Printf("queued %s", j.Input)
 	case encode.Running:
-		log.Printf("encoding %s", name)
+		log.Printf("started %s", name)
 	case encode.Done:
+		if j.Action == encode.ActionNone {
+			log.Printf("done %s: nothing to do", name)
+			break
+		}
 		note := ""
 		if j.Note != "" {
 			note = ", " + j.Note
 		}
-		log.Printf("done %s → %s (%s%s)", name, filepath.Base(j.Output), j.Elapsed().Round(time.Second), note)
+		log.Printf("done %s → %s (%s in %s%s)", name, filepath.Base(j.Output), j.Action, j.Elapsed().Round(time.Second), note)
 	case encode.Failed:
 		log.Printf("failed %s: %v", name, j.Err)
 	case encode.Canceled:
@@ -123,9 +128,59 @@ func logWatch(s encode.Settings) {
 	if len(s.Watch) == 0 {
 		log.Print("cav1ar: no folders watched; add some in the cav1ar settings")
 	}
-	for _, dir := range s.Watch {
-		log.Printf("cav1ar: watching %s", dir)
+	for _, f := range s.Watch {
+		log.Printf("cav1ar: watching %s", f)
 	}
+}
+
+// runDryRun says what a job would do to each video in paths, or in the
+// watched folders if none are given, without doing any of it.
+func runDryRun(ctx context.Context, s encode.Settings, paths []string) error {
+	if len(paths) == 0 {
+		paths = s.WatchPaths()
+	}
+	if len(paths) == 0 {
+		return errors.New("give files or folders to check, or watch some")
+	}
+	counts := map[encode.Action]int{}
+	failed := 0
+	for _, path := range paths {
+		videos := []string{path}
+		if fi, err := os.Stat(path); err == nil && fi.IsDir() {
+			var err error
+			if videos, err = encode.FindVideos(path); err != nil {
+				return err
+			}
+		}
+		for _, v := range videos {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			d, err := encode.Inspect(ctx, v, s)
+			switch {
+			case err != nil:
+				failed++
+				fmt.Printf("FAIL   %s\n       %v\n", v, err)
+			case d.Action == encode.ActionNone:
+				counts[d.Action]++
+			default:
+				counts[d.Action]++
+				fmt.Printf("%-6s %s\n", strings.ToUpper(string(d.Action)), v)
+				if d.Output != v {
+					fmt.Printf("    -> %s\n", filepath.Base(d.Output))
+				}
+				if len(d.Reasons) > 0 {
+					fmt.Printf("       %s\n", strings.Join(d.Reasons, "; "))
+				}
+				for _, n := range d.Notes {
+					fmt.Printf("       %s\n", n)
+				}
+			}
+		}
+	}
+	fmt.Printf("\n%d to encode, %d to remux, %d to rename, %d fine, %d failed\n",
+		counts[encode.ActionEncode], counts[encode.ActionRemux], counts[encode.ActionRename], counts[encode.ActionNone], failed)
+	return nil
 }
 
 // toJournal reports whether stderr goes to the systemd journal.

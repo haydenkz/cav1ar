@@ -58,7 +58,32 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 [ "$(uname -s)" = Linux ] || die "cav1ar only supports Linux"
-has go || die "cav1ar is built with Go 1.27 or newer: https://go.dev/dl/"
+
+# Find a Go new enough to build cav1ar. With mise, `go` may be a shim that
+# fails until a version is set globally, so ask mise for one instead.
+script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
+GO_NEED=1.27
+if [ -f "$script_dir/go.mod" ]; then
+	GO_NEED=$(sed -n 's/^go \([0-9.]*\).*/\1/p' "$script_dir/go.mod")
+fi
+GO_MINOR=$(echo "$GO_NEED" | cut -d. -f1,2)
+# go_ok reports whether the go command given is new enough. Run from the
+# clone, go switches to the toolchain go.mod asks for where it is allowed to.
+go_ok() {
+	have=$(cd "${script_dir:-.}" && "$@" env GOVERSION 2>/dev/null) || return 1
+	awk -v have="${have#go}" -v need="$GO_NEED" 'BEGIN {
+		split(have, h, "."); split(need, n, ".")
+		for (i = 1; i <= 3; i++) { if (h[i] + 0 != n[i] + 0) exit !(h[i] + 0 > n[i] + 0) }
+	}'
+}
+if go_ok go; then
+	GO=go
+elif has mise && go_ok mise exec "go@$GO_MINOR" -- go; then
+	GO="mise exec go@$GO_MINOR -- go"
+	say "using Go $GO_MINOR from mise"
+else
+	die "cav1ar is built with Go $GO_NEED or newer: https://go.dev/dl/"
+fi
 
 # ffmpeg does the encoding, so check it has what cav1ar needs.
 ffmpeg_hint() {
@@ -81,14 +106,13 @@ else
 fi
 
 mkdir -p "$BIN_DIR"
-script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
 if [ -f "$script_dir/go.mod" ] && grep -q "module github.com/$REPO" "$script_dir/go.mod"; then
 	say "building from $script_dir"
 	version=$(git -C "$script_dir" describe --tags --always --dirty 2>/dev/null || echo dev)
-	(cd "$script_dir" && go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$BIN_DIR/cav1ar" ./cmd/cav1ar)
+	(cd "$script_dir" && $GO build -trimpath -ldflags "-s -w -X main.version=$version" -o "$BIN_DIR/cav1ar" ./cmd/cav1ar)
 else
 	say "building with go install"
-	GOBIN="$BIN_DIR" go install "github.com/$REPO/cmd/cav1ar@latest"
+	GOBIN="$BIN_DIR" $GO install "github.com/$REPO/cmd/cav1ar@latest"
 fi
 say "installed $BIN_DIR/cav1ar"
 

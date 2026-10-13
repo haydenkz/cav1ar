@@ -1,11 +1,18 @@
 # cav1ar
 
 Batch-encode video to AV1 from your terminal, or let it watch a library and
-encode new files as they arrive.
+keep every file in it encoded the way you like.
 
-- CPU (SVT-AV1) or GPU (NVIDIA NVENC, AMD/Intel VAAPI) encoding
-- Opus audio, downmixing, and language filters for audio and subtitles
-- Metadata stripping, custom titles, and release-style file names
+- CPU (SVT-AV1) or GPU (NVIDIA NVENC, AMD/Intel VAAPI) encoding, with optional
+  downscaling to a maximum resolution
+- Opus or AAC audio, downmixing, and language filters for audio and subtitles,
+  including keeping just the best audio track
+- Subtitle tidying: drops tracks in the wrong language and duplicates, and
+  flags forced and SDH tracks
+- Only does what a file needs: AV1 video is copied rather than re-encoded, and
+  a file that only has the wrong name is renamed
+- Metadata stripping, custom titles, and release-style file names, taken from
+  Movies and TV folders the way media servers lay them out
 - Folder watching, with an optional background service
 
 ## Install
@@ -24,11 +31,13 @@ cd cav1ar
 cav1ar                  # open the UI
 cav1ar ~/Videos         # open it with a folder's videos queued
 cav1ar -daemon          # run without the UI, using your saved settings
+cav1ar -dry-run         # say what would happen to the watched folders, and touch nothing
 cav1ar -h               # list every flag
 ```
 
 In the UI, press `a` to add files, `s` for settings, `p` to pause, and `?` for
-all keys. In the file browser, `w` watches a folder for new videos.
+all keys. In the file browser, `w` watches a folder; press it again to watch
+it as movies or shows.
 
 Settings are saved to `~/.config/cav1ar/config.json`. A running daemon picks
 up changes made in the UI.
@@ -43,6 +52,27 @@ Encodes are named from a template, set in Settings → Output:
 
 which gives names like `Movie Title (2024) [1080p] [BRRip] [AV1] [Opus5.1] - Group.mkv`.
 Placeholders with nothing to fill them are dropped, along with their brackets.
+
+## Keeping a library encoded
+
+A watched folder can be marked as movies or shows, as in a Jellyfin or Plex
+library. Then titles come from the folders rather than from each download's
+name:
+
+```
+Movies/Title (Year)/anything.mkv     → Title (Year) [1080p] … .mkv
+TV/Show/[Season N/]show.s01e02.mkv   → Show S01E02 [1080p] … .mkv
+```
+
+Set **Videos already in a folder when it is first watched** to *handle them
+too*, and cav1ar checks every video in the library against your settings and
+queues only the ones that don't match. What it has checked is remembered, so
+later scans only look at new and changed files, until the settings change.
+
+Results are written to a hidden file next to the original, and only take its
+place once every track is checked to run its full length. With *delete
+originals* on, a file whose name doesn't change is replaced in place.
+`-retry-failed` gives files that failed another go.
 
 ## Background service
 

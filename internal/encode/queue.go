@@ -196,7 +196,7 @@ func (q *Queue) run(ctx context.Context, j *Job, s Settings) {
 		q.emitLocked(*j, line)
 	}
 	err := encodeFile(ctx, j.Input, s, updates{
-		output: func(path string) { update("", func() { j.Output = path }) },
+		planned: func(a Action, out string) { update("", func() { j.Action, j.Output = a, out }) },
 		started: func(p *os.Process) {
 			q.mu.Lock()
 			defer q.mu.Unlock()

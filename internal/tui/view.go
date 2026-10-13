@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -120,8 +119,18 @@ func (m Model) settingsTabs() string {
 func (m Model) pickerTitle() string {
 	const prefix = "Add files · "
 	dir := shortPath(m.picker.CurrentDirectory)
-	if slices.Contains(m.settings.Watch, m.picker.CurrentDirectory) {
-		dir += " (watched)"
+	for _, f := range m.settings.Watch {
+		if f.Path != m.picker.CurrentDirectory {
+			continue
+		}
+		switch f.Kind {
+		case encode.FolderMovies:
+			dir += " (watched as movies)"
+		case encode.FolderShows:
+			dir += " (watched as shows)"
+		default:
+			dir += " (watched)"
+		}
 	}
 	if over := lipgloss.Width(prefix+dir) - (m.width - 6); over > 0 {
 		dir = "…" + ansi.TruncateLeft(dir, over+1, "")
@@ -201,6 +210,14 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 		icon = m.st.okText.Render("✓")
 		bar, pct = m.bar.ViewAs(1), "100%"
 		info = m.st.okText.Render(cell(doneInfo(j), c.info))
+		switch j.Action {
+		case encode.ActionNone:
+			bar, pct = m.st.dim.Render(cell("nothing to do", c.bar)), ""
+			info = ""
+		case encode.ActionRename:
+			bar, pct = m.st.okText.Render(cell("renamed", c.bar)), ""
+			info = ""
+		}
 		if j.Note != "" {
 			info = m.st.warnText.Render(cell(j.Note+", see log", c.info))
 		}

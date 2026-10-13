@@ -18,14 +18,9 @@ func IsVideo(path string) bool {
 	return slices.Contains(VideoExts, strings.ToLower(filepath.Ext(path)))
 }
 
-// IsEncode reports whether path looks like it is already AV1, going by an
-// "AV1" in its name as cav1ar's own output names have.
-func IsEncode(path string) bool {
-	return av1Word.MatchString(baseName(path))
-}
-
 // FindVideos returns every video under root, including in subfolders, in
-// sorted order. Hidden folders and files that are already AV1 are skipped.
+// sorted order. Hidden files and folders are skipped, which includes results
+// still being written.
 func FindVideos(root string) ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -35,13 +30,11 @@ func FindVideos(root string) ([]string, error) {
 			}
 			return nil // skip unreadable folders rather than giving up
 		}
-		if d.IsDir() {
-			if path != root && strings.HasPrefix(d.Name(), ".") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if IsVideo(path) && !IsEncode(path) {
+		hidden := path != root && strings.HasPrefix(d.Name(), ".")
+		switch {
+		case d.IsDir() && hidden:
+			return filepath.SkipDir
+		case !d.IsDir() && !hidden && IsVideo(path):
 			out = append(out, path)
 		}
 		return nil

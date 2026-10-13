@@ -23,12 +23,28 @@ import (
 // pointer because the form keeps pointers to its fields across updates.
 type settingsDraft struct {
 	encode.Settings
-	crf   string // typed as text, so it can be invalid while being edited
-	watch string // one folder per line
+	crf   string      // typed as text, so it can be invalid while being edited
+	audio audioChoice // codec and bitrate, picked together
+	watch string      // one folder per line
+}
+
+// audioChoice is one entry in the audio list.
+type audioChoice struct {
+	codec encode.AudioCodec
+	kbps  int
 }
 
 func newDraft(s encode.Settings) *settingsDraft {
-	return &settingsDraft{Settings: s, crf: strconv.Itoa(s.CRF), watch: strings.Join(s.Watch, "\n")}
+	var watch []string
+	for _, f := range s.Watch {
+		watch = append(watch, f.String())
+	}
+	return &settingsDraft{
+		Settings: s,
+		crf:      strconv.Itoa(s.CRF),
+		audio:    audioChoice{s.AudioCodec, s.AudioKbps},
+		watch:    strings.Join(watch, "\n"),
+	}
 }
 
 func (d *settingsDraft) settings() (encode.Settings, error) {
@@ -38,6 +54,10 @@ func (d *settingsDraft) settings() (encode.Settings, error) {
 		return s, err
 	}
 	s.CRF = crf
+	if d.audio.kbps != encode.AudioCopy { // copying keeps the codec chosen before
+		s.AudioCodec = d.audio.codec
+	}
+	s.AudioKbps = d.audio.kbps
 	s.Language = strings.ToLower(strings.TrimSpace(s.Language))
 	s.Title = strings.TrimSpace(s.Title)
 	s.ReleaseGroup = strings.TrimSpace(s.ReleaseGroup)
@@ -47,19 +67,21 @@ func (d *settingsDraft) settings() (encode.Settings, error) {
 	return s, s.Validate()
 }
 
-// folders reads one folder per line, ignoring blanks and repeats.
-func folders(text string) []string {
-	var out []string
+// folders reads one folder per line, each optionally starting with movies:
+// or shows:, ignoring blanks and repeats.
+func folders(text string) []encode.WatchFolder {
+	var out []encode.WatchFolder
 	for line := range strings.Lines(text) {
-		dir := expandHome(strings.TrimSpace(line))
-		if dir == "" {
+		f := encode.ParseWatchFolder(strings.TrimSpace(line))
+		f.Path = expandHome(f.Path)
+		if f.Path == "" {
 			continue
 		}
-		if abs, err := filepath.Abs(dir); err == nil {
-			dir = abs
+		if abs, err := filepath.Abs(f.Path); err == nil {
+			f.Path = abs
 		}
-		if !slices.Contains(out, dir) {
-			out = append(out, dir)
+		if !slices.ContainsFunc(out, func(g encode.WatchFolder) bool { return g.Path == f.Path }) {
+			out = append(out, f)
 		}
 	}
 	return out
@@ -70,11 +92,11 @@ func folders(text string) []string {
 var (
 	settingsPages = []string{"Video", "Audio & subtitles", "Metadata", "Output", "Watch"}
 	fieldPage     = map[string]int{
-		"encoder": 0, "crf": 0, "preset": 0, "workers": 0,
-		"audio": 1, "downmix": 1, "language": 1, "audioTracks": 1, "subtitles": 1,
+		"encoder": 0, "crf": 0, "preset": 0, "nvencPreset": 0, "maxHeight": 0, "workers": 0,
+		"audio": 1, "downmix": 1, "language": 1, "audioTracks": 1, "subtitles": 1, "tidySubs": 1,
 		"strip": 2, "title": 2, "group": 2,
 		"name": 3, "outDir": 3, "deleteOriginal": 3,
-		"watch": 4,
+		"watch": 4, "watchExisting": 4,
 	}
 )
 
@@ -86,12 +108,28 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 	for p := 0; p <= 13; p++ {
 		presets = append(presets, option(presetLabel(p), p, rec.Preset))
 	}
-	audio := []huh.Option[int]{
-		option("copy original", encode.AudioCopy, rec.AudioKbps),
-		option("Opus · auto bitrate", encode.AudioAuto, rec.AudioKbps),
+	nvencPresets := make([]huh.Option[int], 0, 7)
+	for p := 1; p <= 7; p++ {
+		nvencPresets = append(nvencPresets, option(nvencPresetLabel(p), p, rec.NVENCPreset))
 	}
-	for _, kbps := range []int{64, 96, 128, 160, 192, 256, 384} {
-		audio = append(audio, option(fmt.Sprintf("Opus %d kbps", kbps), kbps, rec.AudioKbps))
+	maxHeights := []huh.Option[int]{option("keep original", 0, rec.MaxHeight)}
+	for _, h := range encode.MaxHeights {
+		maxHeights = append(maxHeights, option(fmt.Sprintf("scale down to %dp", h), h, rec.MaxHeight))
+	}
+	recAudio := audioChoice{rec.AudioCodec, rec.AudioKbps}
+	audio := []huh.Option[audioChoice]{option("copy original", audioChoice{d.audio.codec, encode.AudioCopy}, recAudio)}
+	for _, c := range []struct {
+		codec encode.AudioCodec
+		name  string
+		rates []int
+	}{
+		{encode.Opus, "Opus", []int{64, 96, 128, 160, 192, 256, 384}},
+		{encode.AAC, "AAC", []int{96, 128, 192, 256, 384, 512}},
+	} {
+		audio = append(audio, option(c.name+" · auto bitrate", audioChoice{c.codec, encode.AudioAuto}, recAudio))
+		for _, kbps := range c.rates {
+			audio = append(audio, option(fmt.Sprintf("%s %d kbps", c.name, kbps), audioChoice{c.codec, kbps}, recAudio))
+		}
 	}
 	encoders := make([]huh.Option[encode.Encoder], 0, len(encode.Encoders))
 	for _, e := range encode.Encoders {
@@ -124,10 +162,22 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 			Value(&d.crf).
 			Validate(func(s string) error { _, err := parseCRF(s); return err }),
 		huh.NewSelect[int]().Key("preset").
-			Title("Speed preset").
+			Title("Speed preset · CPU").
 			Description("Slower makes smaller files.").
 			Options(presets...).
 			Value(&d.Preset).
+			Inline(true),
+		huh.NewSelect[int]().Key("nvencPreset").
+			Title("Speed preset · NVIDIA GPU").
+			Description("Slower makes smaller files.").
+			Options(nvencPresets...).
+			Value(&d.NVENCPreset).
+			Inline(true),
+		huh.NewSelect[int]().Key("maxHeight").
+			Title("Resolution").
+			Description("Bigger video is scaled down to fit. AV1 video that already fits is copied, not re-encoded.").
+			Options(maxHeights...).
+			Value(&d.MaxHeight).
 			Inline(true),
 		huh.NewSelect[int]().Key("workers").
 			Title("Encodes at once").
@@ -137,11 +187,12 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 			Inline(true),
 	)
 	tracks := huh.NewGroup(
-		huh.NewSelect[int]().Key("audio").
+		huh.NewSelect[audioChoice]().Key("audio").
 			Title("Audio").
-			Description("Opus auto uses 128 kbps for stereo, 256 for 5.1.").
+			Description("Auto is 128 kbps for stereo and 256 for 5.1 with Opus, half as much again with AAC.\n"+
+				"Tracks already in that codec and layout are copied.").
 			Options(audio...).
-			Value(&d.AudioKbps).
+			Value(&d.audio).
 			Inline(true),
 		huh.NewSelect[bool]().Key("downmix").
 			Title("Channels").
@@ -152,8 +203,8 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 			Value(&d.Downmix).
 			Inline(true).
 			Validate(func(downmix bool) error {
-				if downmix && d.AudioKbps == encode.AudioCopy {
-					return errors.New("pick Opus above to downmix; copied audio can't be changed")
+				if downmix && d.audio.kbps == encode.AudioCopy {
+					return errors.New("pick Opus or AAC above to downmix; copied audio can't be changed")
 				}
 				return nil
 			}),
@@ -169,6 +220,7 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 			Options(
 				option("keep all", encode.KeepAll, rec.AudioTracks),
 				option("only that language", encode.KeepLanguage, rec.AudioTracks),
+				option("the best one in that language", encode.KeepBest, rec.AudioTracks),
 			).
 			Value(&d.AudioTracks).
 			Inline(true),
@@ -180,6 +232,16 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 				option("remove all", encode.KeepNone, rec.Subtitles),
 			).
 			Value(&d.Subtitles).
+			Inline(true),
+		huh.NewSelect[bool]().Key("tidySubs").
+			Title("Tidy subtitles").
+			Description("Reads the start of each track to drop ones in the wrong language and duplicates,\n"+
+				"and to flag forced and SDH tracks the source didn't.").
+			Options(
+				option("keep as they are", false, rec.TidySubs),
+				option("tidy", true, rec.TidySubs),
+			).
+			Value(&d.TidySubs).
 			Inline(true),
 	)
 	metadata := huh.NewGroup(
@@ -242,17 +304,26 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 	watch := huh.NewGroup(
 		huh.NewText().Key("watch").
 			Title("Watched folders").
-			Description("New videos here or in subfolders are queued. One per line (alt+enter).").
+			Description("Videos here or in subfolders that don't match the settings are queued. One per line (alt+enter).\n"+
+				"Start a line with movies: or shows: to name videos after their folders, as media servers lay them out.").
 			Lines(6).
 			Value(&d.watch).
 			Validate(func(text string) error {
-				for _, dir := range folders(text) {
-					if err := validateDir(dir); err != nil {
-						return fmt.Errorf("%s: %w", dir, err)
+				for _, f := range folders(text) {
+					if err := validateDir(f.Path); err != nil {
+						return fmt.Errorf("%s: %w", f.Path, err)
 					}
 				}
 				return nil
 			}),
+		huh.NewSelect[bool]().Key("watchExisting").
+			Title("Videos already in a folder when it is first watched").
+			Options(
+				option("leave alone", false, rec.WatchExisting),
+				option("handle them too", true, rec.WatchExisting),
+			).
+			Value(&d.WatchExisting).
+			Inline(true),
 	)
 
 	m.form = huh.NewForm(video, tracks, metadata, output, watch).
@@ -359,6 +430,21 @@ func presetLabel(p int) string {
 		speed = "fastest, biggest files"
 	}
 	return fmt.Sprintf("%d · %s", p, speed)
+}
+
+func nvencPresetLabel(p int) string {
+	var speed string
+	switch {
+	case p <= 2:
+		speed = "fastest, biggest files"
+	case p <= 4:
+		speed = "balanced"
+	case p <= 6:
+		speed = "slow"
+	default:
+		speed = "slowest, smallest files"
+	}
+	return fmt.Sprintf("p%d · %s", p, speed)
 }
 
 func validateLanguage(s string) error {
