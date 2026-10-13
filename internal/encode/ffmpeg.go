@@ -124,6 +124,16 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 	}
 
 	tmp := tempPath(out)
+	if s.Preroll != "" {
+		// This is only an intermediate the preroll is joined onto, so keep it
+		// off the library's storage, which then only reads the source and
+		// writes the result.
+		dir, err := workDir()
+		if err != nil {
+			return err
+		}
+		tmp = filepath.Join(dir, filepath.Base(tmp))
+	}
 	defer os.Remove(tmp) // gone already, once the result is in place
 	hwDecode := []bool{false}
 	if action == ActionEncode && s.Encoder == EncoderNVIDIA {

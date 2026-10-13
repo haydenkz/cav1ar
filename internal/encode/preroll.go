@@ -60,6 +60,17 @@ func prerollOf(info mediaInfo) (id string, length time.Duration) {
 	return id, time.Duration(s * float64(time.Second))
 }
 
+// workDir holds the intermediates that prerolls are joined onto, on local
+// storage.
+func workDir() (string, error) {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir = filepath.Join(dir, "cav1ar", "work")
+	return dir, os.MkdirAll(dir, 0o755)
+}
+
 // joinPoint finds where the video after a file's preroll starts: the first
 // keyframe at about length in. Cutting there with stream copy keeps all of
 // the video after it and none of the preroll. The keyframe usually lands a

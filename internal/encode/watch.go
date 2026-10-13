@@ -125,6 +125,9 @@ func (w *Watcher) acquire() bool {
 	for _, f := range w.q.Settings().Watch {
 		removeStaleTemps(f.Path)
 	}
+	if dir, err := workDir(); err == nil {
+		removeStaleTemps(dir)
+	}
 	return true
 }
 
