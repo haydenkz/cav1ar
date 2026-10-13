@@ -140,16 +140,18 @@ func nameSource(r release, path string, folder WatchFolder) (release, error) {
 		}
 		return r, nil
 	}
+	// The title comes from the folder at the top, so extras in subfolders
+	// such as Featurettes still get the movie's or show's.
+	top, _, _ := strings.Cut(rel, string(filepath.Separator))
 	var from release
 	switch folder.Kind {
 	case FolderMovies:
-		from = parseFolder(filepath.Base(filepath.Dir(path)))
+		from = parseFolder(top)
 	case FolderShows:
 		if r.Episode == "" {
 			return r, fmt.Errorf("no episode number (like S01E02) in the file name")
 		}
-		show, _, _ := strings.Cut(rel, string(filepath.Separator))
-		from = parseFolder(show)
+		from = parseFolder(top)
 	default:
 		return r, nil
 	}
@@ -208,16 +210,20 @@ func resolution(width, height int) string {
 }
 
 // fitSize scales width x height down to fit inside maxHeight and its 16:9
-// width, keeping both even, as encoders need. maxHeight 0 keeps the size.
+// width, keeping both even, as encoders need. A size that already fits is
+// kept as it is, and maxHeight 0 fits everything.
 func fitSize(width, height, maxHeight int) (int, int) {
-	if maxHeight <= 0 || width <= 0 || height <= 0 {
+	maxWidth := maxHeight * 16 / 9
+	if maxHeight <= 0 || width <= 0 || height <= 0 || (width <= maxWidth && height <= maxHeight) {
 		return width, height
 	}
-	maxWidth := maxHeight * 16 / 9
-	scale := min(1, float64(maxWidth)/float64(width), float64(maxHeight)/float64(height))
-	even := func(n float64) int { return max(2, int(n/2+0.5)*2) }
+	scale := min(float64(maxWidth)/float64(width), float64(maxHeight)/float64(height))
 	return even(float64(width) * scale), even(float64(height) * scale)
 }
+
+// even rounds a frame dimension to the nearest even number, as encoders
+// need for 4:2:0 video.
+func even(n float64) int { return max(2, int(n/2+0.5)*2) }
 
 // audioTag describes an audio track as it will be encoded, e.g. "AAC2.0" or
 // "Opus5.1".

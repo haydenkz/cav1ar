@@ -3,6 +3,7 @@ package encode
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -23,9 +24,11 @@ import (
 // skip it.
 const tempSuffix = ".cav1ar-tmp.mkv"
 
-// tempPath is where the result for out is written until it checks out.
+// tempPath is where the result for out is written until it checks out: a
+// hidden file beside it, with a random name, since one built from out could
+// run past the length limit for file names when out comes close to it.
 func tempPath(out string) string {
-	return filepath.Join(filepath.Dir(out), "."+baseName(out)+tempSuffix)
+	return filepath.Join(filepath.Dir(out), "."+rand.Text()+tempSuffix)
 }
 
 // IsTemp reports whether path is a result still being written, or left

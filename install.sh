@@ -59,20 +59,30 @@ fi
 
 [ "$(uname -s)" = Linux ] || die "cav1ar only supports Linux"
 
-# Find Go. With mise, `go` may be a shim that fails until a version is set
-# globally, so ask mise for the version cav1ar needs instead.
+# Find a Go new enough to build cav1ar. With mise, `go` may be a shim that
+# fails until a version is set globally, so ask mise for one instead.
 script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
-GO_VERSION=1.27
+GO_NEED=1.27
 if [ -f "$script_dir/go.mod" ]; then
-	GO_VERSION=$(sed -n 's/^go \([0-9]*\.[0-9]*\).*/\1/p' "$script_dir/go.mod")
+	GO_NEED=$(sed -n 's/^go \([0-9.]*\).*/\1/p' "$script_dir/go.mod")
 fi
-if go version >/dev/null 2>&1; then
+GO_MINOR=$(echo "$GO_NEED" | cut -d. -f1,2)
+# go_ok reports whether the go command given is new enough. Run from the
+# clone, go switches to the toolchain go.mod asks for where it is allowed to.
+go_ok() {
+	have=$(cd "${script_dir:-.}" && "$@" env GOVERSION 2>/dev/null) || return 1
+	awk -v have="${have#go}" -v need="$GO_NEED" 'BEGIN {
+		split(have, h, "."); split(need, n, ".")
+		for (i = 1; i <= 3; i++) { if (h[i] + 0 != n[i] + 0) exit !(h[i] + 0 > n[i] + 0) }
+	}'
+}
+if go_ok go; then
 	GO=go
-elif has mise && mise exec "go@$GO_VERSION" -- go version >/dev/null 2>&1; then
-	GO="mise exec go@$GO_VERSION -- go"
-	say "using Go $GO_VERSION from mise"
+elif has mise && go_ok mise exec "go@$GO_MINOR" -- go; then
+	GO="mise exec go@$GO_MINOR -- go"
+	say "using Go $GO_MINOR from mise"
 else
-	die "cav1ar is built with Go $GO_VERSION or newer: https://go.dev/dl/"
+	die "cav1ar is built with Go $GO_NEED or newer: https://go.dev/dl/"
 fi
 
 # ffmpeg does the encoding, so check it has what cav1ar needs.

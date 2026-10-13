@@ -84,7 +84,8 @@ type plan struct {
 
 	video         streamInfo
 	encodeVideo   bool
-	width, height int // output frame size
+	tooBig        bool // bigger than Settings.MaxHeight allows
+	width, height int  // output frame size
 	audio         []audioOut
 	subs          []subOut
 	fonts         []streamInfo // attachments kept for styled subtitles
@@ -115,9 +116,13 @@ func newPlan(in string, s Settings, info mediaInfo) (*plan, error) {
 	}
 
 	p.width, p.height = fitSize(p.video.Width, p.video.Height, s.MaxHeight)
-	p.encodeVideo = p.video.Codec != "av1" || p.width != p.video.Width || p.height != p.video.Height
+	p.tooBig = p.width != p.video.Width || p.height != p.video.Height
+	p.encodeVideo = p.video.Codec != "av1" || p.tooBig
 	if p.encodeVideo && (p.video.Width <= 0 || p.video.Height <= 0) {
 		return p, errors.New("the video stream has no size")
+	}
+	if p.encodeVideo { // some cropped sources have odd sizes
+		p.width, p.height = even(float64(p.width)), even(float64(p.height))
 	}
 
 	for _, st := range p.pickAudio(audio) {
@@ -318,7 +323,7 @@ func (p *plan) reasons() []string {
 	if p.video.Codec != "av1" {
 		add("video %s", p.video.Codec)
 	}
-	if p.width != p.video.Width || p.height != p.video.Height {
+	if p.tooBig {
 		add("%dx%d > %dp", p.video.Width, p.video.Height, s.MaxHeight)
 	}
 	for _, a := range p.audio {
