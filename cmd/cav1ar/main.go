@@ -70,6 +70,7 @@ func main() {
 	})
 	flag.BoolVar(&settings.WatchExisting, "watch-existing", saved.WatchExisting,
 		"also handle videos already in a folder when it is first watched")
+	flag.StringVar(&settings.Preroll, "preroll", saved.Preroll, "a clip to put before every result; empty for none")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "usage: cav1ar [flags] [file or folder...]\n\n")

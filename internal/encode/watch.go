@@ -297,8 +297,12 @@ func fingerprint(s Settings) string {
 		TidySubs, StripMetadata        bool
 		Title, ReleaseGroup, Name, Out string
 		Watch                          []WatchFolder
+		Preroll                        string
 	}{s.MaxHeight, s.AudioCodec, s.AudioKbps == AudioCopy, s.Downmix, s.Language, s.AudioTracks, s.Subtitles,
-		s.TidySubs, s.StripMetadata, s.Title, s.ReleaseGroup, s.NameTemplate, s.OutDir, s.Watch}
+		s.TidySubs, s.StripMetadata, s.Title, s.ReleaseGroup, s.NameTemplate, s.OutDir, s.Watch, s.Preroll}
+	if s.Preroll != "" {
+		key.Preroll, _ = prerollID(s.Preroll) // a new clip at the same path counts as a change
+	}
 	data, _ := json.Marshal(key)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:8])

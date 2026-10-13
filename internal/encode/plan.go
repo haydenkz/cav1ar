@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Action is what a file needs to match the settings.
@@ -93,13 +94,32 @@ type plan struct {
 	out       string   // where the result goes
 	notes     []string // choices worth showing the user, such as tracks left out
 	checkSubs bool     // subtitles need tidying before the plan is final
+
+	prerollHave string        // ID of the preroll the source starts with, if any
+	prerollIn   time.Duration // how long that preroll runs, which the job cuts off
+	prerollWant string        // ID of the preroll the settings want, if any
 }
 
 func newPlan(in string, s Settings, info mediaInfo) (*plan, error) {
 	p := &plan{in: in, settings: s, folder: s.folderOf(in), info: info}
+	if p.prerollHave, p.prerollIn = prerollOf(info); p.prerollIn > 0 {
+		// Judge the source by what follows its preroll.
+		p.info.Streams = slices.Clone(info.Streams)
+		for i := range p.info.Streams {
+			p.info.Streams[i].Duration = max(0, p.info.Streams[i].Duration-p.prerollIn)
+		}
+		p.info.Duration = max(0, p.info.Duration-p.prerollIn)
+	}
+	if s.Preroll != "" {
+		id, err := prerollID(s.Preroll)
+		if err != nil {
+			return p, err
+		}
+		p.prerollWant = id
+	}
 	var haveVideo bool
 	var audio, subs []streamInfo
-	for _, st := range info.Streams {
+	for _, st := range p.info.Streams {
 		switch {
 		case st.Type == "video" && !st.CoverArt && !haveVideo:
 			p.video, haveVideo = st, true
@@ -373,6 +393,15 @@ func (p *plan) reasons() []string {
 	if !strings.EqualFold(filepath.Ext(p.in), ".mkv") {
 		add("to mkv")
 	}
+	switch {
+	case p.prerollWant == p.prerollHave:
+	case p.prerollHave == "":
+		add("add preroll")
+	case p.prerollWant == "":
+		add("remove preroll")
+	default:
+		add("replace preroll")
+	}
 	if p.tagsDiffer() {
 		add("tags")
 	}
@@ -398,7 +427,7 @@ func (p *plan) tagsDiffer() bool {
 	for k := range tags {
 		switch k {
 		case "TITLE", "ENCODED_BY", "ENCODER", "CREATION_TIME", "DURATION",
-			"MAJOR_BRAND", "MINOR_VERSION", "COMPATIBLE_BRANDS":
+			"MAJOR_BRAND", "MINOR_VERSION", "COMPATIBLE_BRANDS", prerollTag:
 		default:
 			return true // something stripping would remove
 		}
@@ -437,6 +466,9 @@ func (p *plan) args(out string, hwDecode bool) []string {
 		args = append(args, beforeInput...)
 	} else {
 		video = []string{"-c:v", "copy"}
+	}
+	if p.prerollIn > 0 { // cut off the preroll, which is added back afterwards if wanted
+		args = append(args, "-ss", seconds6(p.prerollIn))
 	}
 	args = append(args, "-i", p.in, "-map", "0:"+strconv.Itoa(p.video.Index))
 	for _, a := range p.audio {
@@ -525,6 +557,9 @@ func (p *plan) args(out string, hwDecode bool) []string {
 	}
 	if s.ReleaseGroup != "" {
 		args = append(args, "-metadata", "ENCODED_BY="+s.ReleaseGroup)
+	}
+	if p.prerollIn > 0 && !s.StripMetadata {
+		args = append(args, "-metadata", prerollTag+"=")
 	}
 
 	return append(args, "-max_muxing_queue_size", "4096", "-f", "matroska", "-progress", "pipe:1", out)

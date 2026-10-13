@@ -101,6 +101,8 @@ type Settings struct {
 	DeleteOriginal bool          `json:"delete_original,omitempty"` // remove the source once its encode checks out
 	Watch          []WatchFolder `json:"watch,omitempty"`           // folders whose videos are queued; see Watch
 	WatchExisting  bool          `json:"watch_existing,omitempty"`  // also queue videos already in a folder when it is first watched
+
+	Preroll string `json:"preroll,omitempty"` // a clip to put before every result; see preroll.go
 }
 
 // Special AudioKbps values.
@@ -263,6 +265,9 @@ func (s Settings) Summary() string {
 	}
 	if s.Workers > 1 {
 		parts = append(parts, fmt.Sprintf("%d at once", s.Workers))
+	}
+	if s.Preroll != "" {
+		parts = append(parts, "preroll")
 	}
 	return strings.Join(parts, " · ")
 }
