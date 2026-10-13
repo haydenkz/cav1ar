@@ -112,17 +112,29 @@ func (m *Model) addFiles(paths ...string) tea.Cmd {
 	return m.setStatus(fmt.Sprintf("Added %d files", len(added)), false)
 }
 
-// toggleWatch starts or stops watching dir for new videos.
+// toggleWatch moves dir through not watched, watched, watched as movies and
+// watched as shows, and round again.
 func (m *Model) toggleWatch(dir string) tea.Cmd {
 	s := m.settings
 	s.Watch = slices.Clone(s.Watch)
-	msg := "Watching " + filepath.Base(dir) + " and its subfolders for new videos. " +
-		"Ones already there are left alone; press a to add them."
-	if i := slices.Index(s.Watch, dir); i >= 0 {
+	i := slices.IndexFunc(s.Watch, func(f encode.WatchFolder) bool { return f.Path == dir })
+	var msg string
+	switch {
+	case i < 0:
+		s.Watch = append(s.Watch, encode.WatchFolder{Path: dir})
+		msg = "Watching " + filepath.Base(dir) + " and its subfolders. Press w again to name videos after movie folders."
+		if !s.WatchExisting {
+			msg += " Videos already there are left alone; press a to add them."
+		}
+	case s.Watch[i].Kind == encode.FolderAny:
+		s.Watch[i].Kind = encode.FolderMovies
+		msg = "Watching " + filepath.Base(dir) + " as movies, named after their folders. Press w again for shows."
+	case s.Watch[i].Kind == encode.FolderMovies:
+		s.Watch[i].Kind = encode.FolderShows
+		msg = "Watching " + filepath.Base(dir) + " as shows, named after their show folders. Press w again to stop."
+	default:
 		s.Watch = slices.Delete(s.Watch, i, i+1)
 		msg = "Stopped watching " + filepath.Base(dir)
-	} else {
-		s.Watch = append(s.Watch, dir)
 	}
 	if err := m.saveSettings(s); err != nil {
 		return m.setStatus("Couldn't save the watch list: "+err.Error(), true)

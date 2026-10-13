@@ -30,31 +30,44 @@ func main() {
 	// Flags default to the saved settings and override them for this run only.
 	settings := saved
 	daemon := flag.Bool("daemon", false, "run without the UI, logging to stdout; follows the saved settings as they change")
+	dryRun := flag.Bool("dry-run", false, "say what would be done to the files given, or in the watched folders, and exit")
+	retryFailed := flag.Bool("retry-failed", false, "in watched folders, retry videos whose jobs failed before")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Func("encoder", "video encoder: cpu, nvidia or vaapi (default \""+string(saved.Encoder)+"\")",
 		func(v string) error { settings.Encoder = encode.Encoder(v); return nil })
 	flag.IntVar(&settings.CRF, "crf", saved.CRF, "quality, 1–63; lower is better quality and bigger files")
-	flag.IntVar(&settings.Preset, "preset", saved.Preset, "speed, 0 (slowest, smallest files) to 13 (fastest)")
+	flag.IntVar(&settings.Preset, "preset", saved.Preset, "CPU speed, 0 (slowest, smallest files) to 13 (fastest)")
+	flag.IntVar(&settings.NVENCPreset, "nvenc-preset", saved.NVENCPreset, "NVIDIA speed, 1 (fastest) to 7 (slowest, smallest files)")
+	flag.IntVar(&settings.MaxHeight, "max-height", saved.MaxHeight, "scale bigger video down to this height, e.g. 1080; 0 keeps the size")
 	flag.IntVar(&settings.Workers, "j", saved.Workers, "number of files to encode at once")
-	flag.IntVar(&settings.AudioKbps, "audio", saved.AudioKbps, "Opus bitrate in kbps; -1 picks one per track, 0 copies the original audio")
-	flag.BoolVar(&settings.Downmix, "stereo", saved.Downmix, "downmix audio to stereo (needs Opus)")
+	flag.Func("audio-codec", "audio codec: opus or aac (default \""+string(saved.AudioCodec)+"\")",
+		func(v string) error { settings.AudioCodec = encode.AudioCodec(v); return nil })
+	flag.IntVar(&settings.AudioKbps, "audio", saved.AudioKbps, "audio bitrate in kbps; -1 picks one per track, 0 copies the original audio")
+	flag.BoolVar(&settings.Downmix, "stereo", saved.Downmix, "downmix surround audio to stereo (needs encoded audio)")
 	flag.StringVar(&settings.Language, "lang", saved.Language, "language for the track filters, e.g. eng")
-	flag.Func("audio-tracks", "audio tracks to keep: all or language (default \""+string(saved.AudioTracks)+"\")",
+	flag.Func("audio-tracks", "audio tracks to keep: all, language, or the best one in it (default \""+string(saved.AudioTracks)+"\")",
 		func(v string) error { settings.AudioTracks = encode.TrackFilter(v); return nil })
 	flag.Func("subs", "subtitles to keep: all, language or none (default \""+string(saved.Subtitles)+"\")",
 		func(v string) error { settings.Subtitles = encode.TrackFilter(v); return nil })
+	flag.BoolVar(&settings.TidySubs, "tidy-subs", saved.TidySubs,
+		"drop subtitles in the wrong language and duplicates, and flag forced and SDH ones")
 	flag.BoolVar(&settings.StripMetadata, "strip", saved.StripMetadata, "strip the source's titles and tags")
 	flag.StringVar(&settings.Title, "title", saved.Title, "title shown in players; placeholders as for -name")
 	flag.StringVar(&settings.ReleaseGroup, "group", saved.ReleaseGroup, "release group, for {group} and the ENCODED_BY tag")
 	flag.StringVar(&settings.NameTemplate, "name", saved.NameTemplate,
 		"output file name; placeholders: "+strings.Join(encode.NamePlaceholders, " "))
 	flag.StringVar(&settings.OutDir, "out", saved.OutDir, "folder for encodes; empty saves next to each source")
-	flag.BoolVar(&settings.DeleteOriginal, "delete", saved.DeleteOriginal, "permanently delete each original once its encode checks out")
-	flag.Func("watch", "watch a folder and its subfolders for new videos (repeatable)", func(dir string) error {
-		abs, err := filepath.Abs(dir)
-		settings.Watch = append(settings.Watch, abs)
+	flag.BoolVar(&settings.DeleteOriginal, "delete", saved.DeleteOriginal, "permanently delete each original once its result checks out")
+	flag.Func("watch", "keep a folder's videos encoded, including in subfolders (repeatable); "+
+		"prefix movies: or shows: to name them after their folders", func(v string) error {
+		f := encode.ParseWatchFolder(v)
+		abs, err := filepath.Abs(f.Path)
+		f.Path = abs
+		settings.Watch = append(settings.Watch, f)
 		return err
 	})
+	flag.BoolVar(&settings.WatchExisting, "watch-existing", saved.WatchExisting,
+		"also handle videos already in a folder when it is first watched")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
 		fmt.Fprintf(out, "usage: cav1ar [flags] [file or folder...]\n\n")
@@ -81,11 +94,19 @@ func main() {
 		fail(1, "%v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	if *daemon {
+	if *daemon || *dryRun {
 		ctx, cancel = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	}
+	if *dryRun {
+		err := runDryRun(ctx, settings, flag.Args())
+		cancel()
+		if err != nil {
+			fail(1, "%v", err)
+		}
+		return
+	}
 	q := encode.NewQueue(ctx, settings)
-	w := encode.Watch(ctx, q, watchState)
+	w := encode.Watch(ctx, q, watchState, *retryFailed)
 	for _, arg := range flag.Args() {
 		if err := add(q, arg); err != nil {
 			fail(1, "%v", err)
@@ -129,7 +150,11 @@ func printSummary(jobs []encode.Job) {
 			if j.Note != "" {
 				note = " (" + j.Note + ")"
 			}
-			fmt.Printf("✓ %s → %s%s\n", j.Input, j.Output, note)
+			if j.Action == encode.ActionNone {
+				fmt.Printf("✓ %s: nothing to do\n", j.Input)
+			} else {
+				fmt.Printf("✓ %s → %s%s\n", j.Input, j.Output, note)
+			}
 		case encode.Failed:
 			fmt.Printf("✗ %s: %v\n", j.Input, j.Err)
 		default:

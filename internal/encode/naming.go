@@ -2,6 +2,7 @@ package encode
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,9 +20,9 @@ var NamePlaceholders = []string{
 // release describes a source in the terms output names are built from.
 type release struct {
 	Name       string // source file name without extension
-	Title      string // e.g. "Movie Title", parsed from Name
-	Year       string // e.g. "2024", parsed from Name
-	Episode    string // e.g. "S01E02", parsed from Name
+	Title      string // e.g. "Movie Title", parsed from Name or the folder
+	Year       string // e.g. "2024", parsed from Name or the folder
+	Episode    string // e.g. "S01E02" or "S01E01-E02", parsed from Name
 	Source     string // e.g. "BRRip", parsed from Name
 	Resolution string // e.g. "1080p", from the video stream
 	Audio      string // the first audio track as encoded, e.g. "AAC2.0"
@@ -29,8 +30,12 @@ type release struct {
 }
 
 var (
-	yearPattern    = regexp.MustCompile(`\b(19|20)\d\d\b`)
-	episodePattern = regexp.MustCompile(`(?i)\bS(\d{1,2}) ?E(\d{1,3})\b`)
+	yearPattern = regexp.MustCompile(`\b(19|20)\d\d\b`)
+	// episodePattern matches S01E02, S01E01E02 and S01E01-E02; the first
+	// group is the whole tag.
+	episodePattern = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(S(\d{1,2})[ ._-]*E(\d{1,3})((?:[ ._-]*-?[ ._-]*E\d{1,3})*))`)
+	extraEpisode   = regexp.MustCompile(`(?i)E(\d{1,3})`)
+	crossEpisode   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])((\d{1,2})x(\d{2,3}))(?:[^a-z0-9]|$)`) // 1x04
 	// techPattern finds where a scene name's title ends and its technical
 	// details begin.
 	techPattern = regexp.MustCompile(`(?i)\b(\d{3,4}p|4k|uhd|hdr|bluray|blu-ray|bdrip|brrip|remux|web-?dl|webrip|web|hdtv|dvdrip|dvd|hdrip|x26[45]|h ?26[45]|hevc|avc|av1|xvid|aac|ac3|dts|repack|proper|extended|unrated|remastered)\b`)
@@ -44,28 +49,34 @@ var (
 		{regexp.MustCompile(`(?i)\b(dvdrip|dvd)\b`), "DVDRip"},
 		{regexp.MustCompile(`(?i)\bhdrip\b`), "HDRip"},
 	}
-	leadingTag   = regexp.MustCompile(`^\[[^\]]*\]\s*`) // "[Group] Show - 01"
+	leadingTag   = regexp.MustCompile(`^\[[^\]]*\]\s*`)       // "[Group] Show - 01"
+	folderTags   = regexp.MustCompile(`\{[^}]*\}|\[[^\]]*\]`) // "{tmdb-123}", "[imdbid-tt123]"
 	emptyBracket = regexp.MustCompile(`\(\s*\)|\[\s*\]|\{\s*\}`)
 	extraSpace   = regexp.MustCompile(`\s{2,}`)
-	av1Word      = regexp.MustCompile(`(?i)(^|[^a-z0-9])av1([^a-z0-9]|$)`)
 )
 
-// parseRelease reads the title, year, episode and source out of a scene-style
-// file name such as "Movie.Title.2024.1080p.BluRay.x264-GRP.mkv".
+// parseRelease reads the title, year, episode and source out of a file name,
+// either scene-style such as "Movie.Title.2024.1080p.BluRay.x264-GRP.mkv" or
+// already tidy such as "Movie Title (2024) [1080p].mkv".
 func parseRelease(path string) release {
-	r := release{Name: baseName(path)}
-	words := strings.NewReplacer(".", " ", "_", " ").Replace(r.Name)
+	return parseName(baseName(path))
+}
+
+func parseName(name string) release {
+	r := release{Name: name}
+	words := name
+	if !strings.Contains(words, " ") { // dots and underscores separate words only in scene names
+		words = strings.NewReplacer(".", " ", "_", " ").Replace(words)
+	}
 	words = leadingTag.ReplaceAllString(words, "")
 
 	end := len(words)
 	if loc := techPattern.FindStringIndex(words); loc != nil {
 		end = loc[0]
 	}
-	if m := episodePattern.FindStringSubmatchIndex(words); m != nil {
-		season, _ := strconv.Atoi(words[m[2]:m[3]])
-		episode, _ := strconv.Atoi(words[m[4]:m[5]])
-		r.Episode = fmt.Sprintf("S%02dE%02d", season, episode)
-		end = min(end, m[0])
+	if tag, start := episodeTag(words); tag != "" {
+		r.Episode = tag
+		end = min(end, start)
 	}
 	// The year is the last one before the technical details, skipping one
 	// that starts the name, as in "1917.2019" or "2001.A.Space.Odyssey.1968".
@@ -76,6 +87,7 @@ func parseRelease(path string) release {
 		}
 	}
 	r.Title = strings.TrimRight(strings.TrimSpace(words[:end]), " -([{")
+	r.Title = extraSpace.ReplaceAllString(r.Title, " ")
 	if r.Title == "" {
 		r.Title = r.Name
 	}
@@ -87,6 +99,62 @@ func parseRelease(path string) release {
 		}
 	}
 	return r
+}
+
+// episodeTag finds an episode number in a name and writes it as S01E02, or
+// S01E01-E02 for a file holding several. start is where it was found.
+func episodeTag(name string) (tag string, start int) {
+	if m := episodePattern.FindStringSubmatchIndex(name); m != nil {
+		season, _ := strconv.Atoi(name[m[4]:m[5]])
+		episode, _ := strconv.Atoi(name[m[6]:m[7]])
+		tag = fmt.Sprintf("S%02dE%02d", season, episode)
+		for _, extra := range extraEpisode.FindAllStringSubmatch(name[m[8]:m[9]], -1) {
+			n, _ := strconv.Atoi(extra[1])
+			tag += fmt.Sprintf("-E%02d", n)
+		}
+		return tag, m[2]
+	}
+	if m := crossEpisode.FindStringSubmatchIndex(name); m != nil {
+		season, _ := strconv.Atoi(name[m[4]:m[5]])
+		episode, _ := strconv.Atoi(name[m[6]:m[7]])
+		return fmt.Sprintf("S%02dE%02d", season, episode), m[2]
+	}
+	return "", 0
+}
+
+// parseFolder reads a title and year from a folder name such as
+// "Movie Title (2024) [tmdbid-123]" or "Show Name".
+func parseFolder(name string) release {
+	name = strings.TrimSpace(extraSpace.ReplaceAllString(folderTags.ReplaceAllString(name, ""), " "))
+	return parseName(name)
+}
+
+// nameSource fills r's title and year from the folders path is in, following
+// the layout of the watched folder it is under. Shows must have an episode
+// number in the file name, since nothing else says which episode a file is.
+func nameSource(r release, path string, folder WatchFolder) (release, error) {
+	rel, err := filepath.Rel(folder.Path, path)
+	if err != nil || rel == filepath.Base(path) { // directly in the watched folder
+		if folder.Kind == FolderShows && r.Episode == "" {
+			return r, fmt.Errorf("no episode number (like S01E02) in the file name")
+		}
+		return r, nil
+	}
+	var from release
+	switch folder.Kind {
+	case FolderMovies:
+		from = parseFolder(filepath.Base(filepath.Dir(path)))
+	case FolderShows:
+		if r.Episode == "" {
+			return r, fmt.Errorf("no episode number (like S01E02) in the file name")
+		}
+		show, _, _ := strings.Cut(rel, string(filepath.Separator))
+		from = parseFolder(show)
+	default:
+		return r, nil
+	}
+	r.Title, r.Year = from.Title, from.Year
+	return r, nil
 }
 
 // expand fills in a template's placeholders, then tidies away brackets and
@@ -119,16 +187,19 @@ func fileName(template string, r release) string {
 }
 
 // resolution names a frame size the way release names do, allowing for
-// widescreen video that is shorter than its nominal height.
+// widescreen video that is shorter than its nominal height: a 1920x800 scope
+// film is still 1080p.
 func resolution(width, height int) string {
 	switch {
 	case width == 0 && height == 0:
 		return ""
 	case width >= 3200 || height >= 1800:
 		return "2160p"
-	case width >= 1800 || height >= 1000:
+	case width >= 2400 || height >= 1300:
+		return "1440p"
+	case width >= 1600 || height >= 900:
 		return "1080p"
-	case width >= 1200 || height >= 700:
+	case width >= 1100 || height >= 650:
 		return "720p"
 	case height > 480:
 		return "576p"
@@ -136,20 +207,32 @@ func resolution(width, height int) string {
 	return "480p"
 }
 
-// audioTag describes an audio track as it will be encoded, e.g. "AAC2.0" or
-// "Opus5.1".
-func audioTag(st streamInfo, s Settings) string {
-	if s.AudioKbps == AudioCopy {
-		return codecTag(st.Codec) + channelTag(st.Channels)
+// fitSize scales width x height down to fit inside maxHeight and its 16:9
+// width, keeping both even, as encoders need. maxHeight 0 keeps the size.
+func fitSize(width, height, maxHeight int) (int, int) {
+	if maxHeight <= 0 || width <= 0 || height <= 0 {
+		return width, height
 	}
-	return "Opus" + channelTag(opusChannels(st.Channels, s.Downmix))
+	maxWidth := maxHeight * 16 / 9
+	scale := min(1, float64(maxWidth)/float64(width), float64(maxHeight)/float64(height))
+	even := func(n float64) int { return max(2, int(n/2+0.5)*2) }
+	return even(float64(width) * scale), even(float64(height) * scale)
 }
 
-// opusChannels is how many channels a track has once encoded to Opus, after
-// downmixing or remapping to a layout libopus accepts.
-func opusChannels(ch int, downmix bool) int {
+// audioTag describes an audio track as it will be encoded, e.g. "AAC2.0" or
+// "Opus5.1".
+func audioTag(a audioOut) string {
+	if a.copy {
+		return codecTag(a.Codec) + channelTag(a.Channels)
+	}
+	return codecTag(string(a.codec)) + channelTag(a.channels)
+}
+
+// outChannels is how many channels a track has once encoded, after
+// downmixing or remapping to a layout the encoders accept.
+func outChannels(ch int, downmix bool) int {
 	switch {
-	case downmix:
+	case downmix && ch > 2:
 		return 2
 	case ch >= 7:
 		return 8
@@ -159,18 +242,22 @@ func opusChannels(ch int, downmix bool) int {
 	return ch
 }
 
-// opusBitrate is the auto bitrate for a track, in kbps: near-transparent for
-// its number of channels.
-func opusBitrate(ch int) int {
+// autoBitrate is the auto bitrate for a track, in kbps: near-transparent for
+// its codec and number of channels.
+func autoBitrate(codec AudioCodec, ch int) int {
+	kbps := 384 // Opus 7.1
 	switch {
 	case ch == 1:
-		return 64
+		kbps = 64
 	case ch <= 2:
-		return 128
+		kbps = 128
 	case ch <= 6:
-		return 256
+		kbps = 256
 	}
-	return 384
+	if codec == AAC { // AAC needs about half as much again for the same quality
+		kbps = kbps * 3 / 2
+	}
+	return kbps
 }
 
 // codecTag names an audio codec the way release names do.
@@ -211,7 +298,7 @@ func channelTag(n int) string {
 func (s Settings) sample() release {
 	r := parseRelease("Movie.Title.2024.1080p.BluRay.x264-GRP.mkv")
 	r.Resolution = "1080p"
-	r.Audio = audioTag(streamInfo{Codec: "eac3", Channels: 6}, s)
+	r.Audio = audioTag(s.audioOut(streamInfo{Codec: "eac3", Channels: 6}))
 	r.Group = strings.TrimSpace(s.ReleaseGroup)
 	return r
 }

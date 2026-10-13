@@ -58,7 +58,22 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 [ "$(uname -s)" = Linux ] || die "cav1ar only supports Linux"
-has go || die "cav1ar is built with Go 1.27 or newer: https://go.dev/dl/"
+
+# Find Go. With mise, `go` may be a shim that fails until a version is set
+# globally, so ask mise for the version cav1ar needs instead.
+script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
+GO_VERSION=1.27
+if [ -f "$script_dir/go.mod" ]; then
+	GO_VERSION=$(sed -n 's/^go \([0-9]*\.[0-9]*\).*/\1/p' "$script_dir/go.mod")
+fi
+if go version >/dev/null 2>&1; then
+	GO=go
+elif has mise && mise exec "go@$GO_VERSION" -- go version >/dev/null 2>&1; then
+	GO="mise exec go@$GO_VERSION -- go"
+	say "using Go $GO_VERSION from mise"
+else
+	die "cav1ar is built with Go $GO_VERSION or newer: https://go.dev/dl/"
+fi
 
 # ffmpeg does the encoding, so check it has what cav1ar needs.
 ffmpeg_hint() {
@@ -81,14 +96,13 @@ else
 fi
 
 mkdir -p "$BIN_DIR"
-script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
 if [ -f "$script_dir/go.mod" ] && grep -q "module github.com/$REPO" "$script_dir/go.mod"; then
 	say "building from $script_dir"
 	version=$(git -C "$script_dir" describe --tags --always --dirty 2>/dev/null || echo dev)
-	(cd "$script_dir" && go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$BIN_DIR/cav1ar" ./cmd/cav1ar)
+	(cd "$script_dir" && $GO build -trimpath -ldflags "-s -w -X main.version=$version" -o "$BIN_DIR/cav1ar" ./cmd/cav1ar)
 else
 	say "building with go install"
-	GOBIN="$BIN_DIR" go install "github.com/$REPO/cmd/cav1ar@latest"
+	GOBIN="$BIN_DIR" $GO install "github.com/$REPO/cmd/cav1ar@latest"
 fi
 say "installed $BIN_DIR/cav1ar"
 
