@@ -13,12 +13,13 @@ import (
 
 	"github.com/haydenkz/cav1ar/internal/config"
 	"github.com/haydenkz/cav1ar/internal/encode"
+	"github.com/haydenkz/cav1ar/internal/remote"
 )
 
 // runDaemon encodes without the UI, logging a line as each job starts and
-// finishes. It picks up settings saved from the UI as they change. Given files
-// to encode and no folders to watch, it exits once they are done; otherwise
-// it runs until ctx is canceled.
+// finishes, and sharing its queue with any UI that opens. It picks up settings
+// saved from the UI as they change. Given files to encode and no folders to
+// watch, it exits once they are done; otherwise it runs until ctx is canceled.
 func runDaemon(ctx context.Context, q *encode.Queue, w *encode.Watcher, batch bool) error {
 	if toJournal() {
 		log.SetFlags(0) // the journal adds its own timestamps
@@ -29,7 +30,13 @@ func runDaemon(ctx context.Context, q *encode.Queue, w *encode.Watcher, batch bo
 	}
 	log.Printf("cav1ar: %s", s.Summary())
 	logWatch(s)
-	go followSettings(ctx, q)
+	srv, err := remote.Serve(q, w)
+	if err != nil {
+		log.Printf("cav1ar: the UI can't show this daemon: %v", err)
+	} else {
+		defer srv.Close()
+	}
+	go followSettings(ctx, q, srv)
 	time.AfterFunc(2*time.Second, func() {
 		if len(q.Settings().Watch) > 0 && !w.Active() {
 			log.Print("cav1ar: another cav1ar is watching the folders; this one takes over if it stops")
@@ -45,6 +52,9 @@ func runDaemon(ctx context.Context, q *encode.Queue, w *encode.Watcher, batch bo
 		}
 		for _, ev := range evs {
 			logEvent(ev, state)
+		}
+		if srv != nil {
+			srv.Publish(evs)
 		}
 		if batch && len(q.Settings().Watch) == 0 && allFinished(q.Jobs()) {
 			return nil
@@ -85,8 +95,9 @@ func logEvent(ev encode.Event, state map[int]encode.State) {
 	}
 }
 
-// followSettings applies settings saved from the UI while the daemon runs.
-func followSettings(ctx context.Context, q *encode.Queue) {
+// followSettings applies settings saved from the UI while the daemon runs,
+// and tells any UI showing the daemon.
+func followSettings(ctx context.Context, q *encode.Queue, srv *remote.Server) {
 	path, err := config.Path()
 	if err != nil {
 		return
@@ -118,6 +129,9 @@ func followSettings(ctx context.Context, q *encode.Queue) {
 				continue
 			}
 			q.SetSettings(s)
+			if srv != nil {
+				srv.SetSettings(s)
+			}
 			log.Printf("cav1ar: settings changed: %s", s.Summary())
 			logWatch(s)
 		}

@@ -32,16 +32,48 @@ const (
 // eventsMsg carries a batch of queue events into Update.
 type eventsMsg []encode.Event
 
+// queueClosedMsg says the queue won't send any more events: the UI is
+// closing, or the daemon it showed has gone.
+type queueClosedMsg struct{}
+
+// Backend is the queue the UI shows and controls: one of its own, or a
+// daemon's.
+type Backend interface {
+	Add(path string)
+	Cancel(id int)
+	Retry(id int)
+	SetPaused(paused bool)
+	Paused() bool
+	Jobs() []encode.Job
+	Next() []encode.Event
+	Settings() encode.Settings
+	SetSettings(s encode.Settings)
+	Watching() bool // whether this queue's cav1ar is the one watching folders
+	Daemon() bool   // whether the queue is a daemon's, which carries on once the UI closes
+}
+
+// Local is a queue of the UI's own, whose folders w watches.
+func Local(q *encode.Queue, w *encode.Watcher) Backend { return local{q, w} }
+
+type local struct {
+	*encode.Queue
+	w *encode.Watcher
+}
+
+func (l local) Watching() bool { return l.w.Active() }
+func (l local) Daemon() bool   { return false }
+
 // clearStatusMsg hides the status line, unless a newer status replaced it.
 type clearStatusMsg struct{ id int }
 
 // Model is the root Bubble Tea model.
 type Model struct {
-	queue    *encode.Queue
-	watcher  *encode.Watcher
+	queue    Backend
 	settings encode.Settings
 	paused   bool
 	screen   screen
+	lost     bool // the daemon whose queue this showed has gone
+	placed   bool // the cursor has been put on the daemon's current job
 
 	jobs   []encode.Job // indexed by job ID
 	logs   [][]string   // indexed by job ID
@@ -70,12 +102,12 @@ type Model struct {
 	statusID  int
 }
 
-// New returns a model that displays and controls q, whose folders w watches.
-func New(q *encode.Queue, w *encode.Watcher) Model {
+// New returns a model that displays and controls q.
+func New(q Backend) Model {
 	m := Model{
 		queue:    q,
-		watcher:  w,
 		settings: q.Settings(),
+		paused:   q.Paused(),
 		keys:     defaultKeys(),
 		help:     help.New(),
 		spin:     spinner.New(spinner.WithSpinner(spinner.MiniDot)),
@@ -93,12 +125,12 @@ func (m Model) Init() tea.Cmd {
 }
 
 // listen waits for the next batch of queue events.
-func listen(q *encode.Queue) tea.Cmd {
+func listen(q Backend) tea.Cmd {
 	return func() tea.Msg {
 		if evs := q.Next(); evs != nil {
 			return eventsMsg(evs)
 		}
-		return nil
+		return queueClosedMsg{}
 	}
 }
 
@@ -112,11 +144,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setTheme(msg.IsDark())
 	case eventsMsg:
 		m.apply(msg)
+		if !m.placed && m.queue.Daemon() {
+			m.placeCursor()
+		}
 		cmds = append(cmds, listen(m.queue))
+	case queueClosedMsg:
+		m.lost = m.queue.Daemon()
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		cmds = append(cmds, cmd)
+		// Another UI, or the settings file, may have changed these.
+		m.settings, m.paused = m.queue.Settings(), m.queue.Paused()
 	case clearStatusMsg:
 		if msg.id == m.statusID {
 			m.status = ""
@@ -153,7 +192,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) queueKey(msg tea.KeyPressMsg) tea.Cmd {
 	if key.Matches(msg, m.keys.Quit) {
-		if m.confirmQuit || m.count(encode.Running) == 0 {
+		if m.confirmQuit || m.count(encode.Running) == 0 || m.queue.Daemon() {
 			return tea.Quit
 		}
 		m.confirmQuit = true
@@ -227,6 +266,23 @@ func (m *Model) apply(evs []encode.Event) {
 			m.appendLog(id, strings.ReplaceAll(ev.Line, "\t", "    "))
 		}
 	}
+}
+
+// placeCursor selects the job a daemon is working on, or the last one it
+// finished, rather than the first of a long list.
+func (m *Model) placeCursor() {
+	m.placed = true
+	last := -1
+	for i, j := range m.jobs {
+		switch {
+		case j.State == encode.Running:
+			m.selectJob(i)
+			return
+		case j.State.Finished():
+			last = i
+		}
+	}
+	m.selectJob(last)
 }
 
 func (m *Model) appendLog(id int, line string) {

@@ -35,6 +35,11 @@ cav1ar -dry-run         # say what would happen to the watched folders, and touc
 cav1ar -h               # list every flag
 ```
 
+When a cav1ar daemon is running, `cav1ar` opens the UI on the daemon's queue:
+it shows what the daemon is doing, and adding, pausing, canceling and
+retrying act on the daemon's jobs, which carry on once the UI closes. Pass
+`-local` for a queue of the UI's own instead.
+
 In the UI, press `a` to add files, `s` for settings, `p` to pause, and `?` for
 all keys. In the file browser, `w` watches a folder; press it again to watch
 it as movies or shows.
@@ -77,7 +82,7 @@ originals* on, a file whose name doesn't change is replaced in place.
 ## Background service
 
 `./install.sh --service` sets up a systemd user service that runs
-`cav1ar -daemon`.
+`cav1ar -daemon`. Run `cav1ar` to see what it's doing.
 
 ```sh
 journalctl --user -u cav1ar -f    # follow the log
