@@ -191,7 +191,14 @@ func prerollFor(ctx context.Context, s Settings, mainPath string, main mediaInfo
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", 0, err
 	}
-	tmp := out + ".tmp"
+	// Jobs running at once may build the same one; each writes its own
+	// file, and whichever finishes last wins.
+	f, err := os.CreateTemp(dir, ".build-*.mkv")
+	if err != nil {
+		return "", 0, err
+	}
+	f.Close()
+	tmp := f.Name()
 	defer os.Remove(tmp)
 	u.log(fmt.Sprintf("cav1ar: encoding the preroll to match %dx%d %s %s", v.Width, v.Height, v.FrameRate, v.PixFmt))
 	if b, err := exec.CommandContext(ctx, "ffmpeg", append(args, "-f", "matroska", tmp)...).CombinedOutput(); err != nil {
