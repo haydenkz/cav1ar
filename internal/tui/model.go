@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -75,10 +76,11 @@ type Model struct {
 	lost     bool // the daemon whose queue this showed has gone
 	placed   bool // the cursor has been put on the daemon's current job
 
-	jobs   []encode.Job // indexed by job ID
-	logs   [][]string   // indexed by job ID
-	cursor int          // selected job
-	offset int          // first job row in view
+	jobs     []encode.Job // indexed by job ID
+	logs     [][]string   // indexed by job ID
+	cursor   int          // selected job
+	offset   int          // first job row in view
+	hideDone bool         // leave finished jobs out of the list, apart from failed ones
 
 	width, height int
 	jobsH, logH   int
@@ -202,9 +204,16 @@ func (m *Model) queueKey(msg tea.KeyPressMsg) tea.Cmd {
 	m.confirmQuit = false
 	switch {
 	case key.Matches(msg, m.keys.Up):
-		m.selectJob(m.cursor - 1)
+		m.moveCursor(-1)
 	case key.Matches(msg, m.keys.Down):
-		m.selectJob(m.cursor + 1)
+		m.moveCursor(1)
+	case key.Matches(msg, m.keys.HideDone):
+		m.hideDone = !m.hideDone
+		if m.hideDone {
+			m.keys.HideDone.SetHelp("h", "show done")
+		} else {
+			m.keys.HideDone.SetHelp("h", "hide done")
+		}
 	case key.Matches(msg, m.keys.LogUp):
 		m.log.PageUp()
 		m.follow = m.log.AtBottom()
@@ -304,6 +313,29 @@ func (m *Model) selectJob(i int) {
 	m.logDirty = true
 }
 
+// rows lists the jobs the list shows, by index: all of them, or when
+// finished ones are hidden, those still to do and those that failed.
+func (m Model) rows() []int {
+	rows := make([]int, 0, len(m.jobs))
+	for i, j := range m.jobs {
+		if !m.hideDone || j.State != encode.Done && j.State != encode.Canceled {
+			rows = append(rows, i)
+		}
+	}
+	return rows
+}
+
+// moveCursor selects the job n rows below the selected one, or above it
+// when n is negative.
+func (m *Model) moveCursor(n int) {
+	rows := m.rows()
+	if len(rows) == 0 {
+		return
+	}
+	at, _ := slices.BinarySearch(rows, m.cursor)
+	m.selectJob(rows[min(max(at+n, 0), len(rows)-1)])
+}
+
 // setStatus shows a message in the footer for a few seconds.
 func (m *Model) setStatus(s string, bad bool) tea.Cmd {
 	m.statusID++
@@ -322,21 +354,28 @@ func (m *Model) layout() {
 	m.help.SetWidth(m.width - 2)
 	avail := m.bodyHeight()
 
-	m.jobsH = max(min(len(m.jobs)+2, avail/2), 3)
+	shown := m.rows()
+	m.jobsH = max(min(len(shown)+2, avail/2), 3)
 	m.logH = max(avail-m.jobsH, 3)
 	m.log.SetWidth(m.width - 4)
 	m.log.SetHeight(m.logH - 2)
 	m.bar.SetWidth(columnsFor(m.width - 4).bar)
 	m.picker.SetHeight(max(avail-2, 1))
 
+	// A hidden job can't stay selected, so select the next one shown.
+	at, found := slices.BinarySearch(shown, m.cursor)
+	if !found && len(shown) > 0 {
+		at = min(at, len(shown)-1)
+		m.selectJob(shown[at])
+	}
 	rows := m.jobsH - 2
-	if m.cursor < m.offset {
-		m.offset = m.cursor
+	if at < m.offset {
+		m.offset = at
 	}
-	if m.cursor >= m.offset+rows {
-		m.offset = m.cursor - rows + 1
+	if at >= m.offset+rows {
+		m.offset = at - rows + 1
 	}
-	m.offset = min(max(m.offset, 0), max(len(m.jobs)-rows, 0))
+	m.offset = min(max(m.offset, 0), max(len(shown)-rows, 0))
 }
 
 func (m *Model) setTheme(isDark bool) {

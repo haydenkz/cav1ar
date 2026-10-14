@@ -7,6 +7,7 @@ type keyMap struct {
 	Up, Down       key.Binding
 	LogUp, LogDown key.Binding
 	Cancel, Retry  key.Binding
+	HideDone       key.Binding
 	Add, Settings  key.Binding
 	Pause          key.Binding
 	Help, Quit     key.Binding
@@ -30,6 +31,7 @@ func defaultKeys() keyMap {
 		LogDown:   key.NewBinding(key.WithKeys("pgdown", "ctrl+d"), key.WithHelp("pgdn", "scroll log down")),
 		Cancel:    key.NewBinding(key.WithKeys("x", "delete"), key.WithHelp("x", "cancel")),
 		Retry:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "retry")),
+		HideDone:  key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "hide done")),
 		Add:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add files")),
 		Settings:  key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "settings")),
 		Pause:     key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause")),
@@ -46,7 +48,7 @@ func defaultKeys() keyMap {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Add, k.Settings, k.Pause, k.Cancel, k.Retry, k.Help, k.Quit}
+	return []key.Binding{k.Add, k.Settings, k.Pause, k.Cancel, k.Retry, k.HideDone, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
@@ -54,7 +56,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down},
 		{k.LogUp, k.LogDown},
 		{k.Add, k.Settings, k.Pause},
-		{k.Cancel, k.Retry},
+		{k.Cancel, k.Retry, k.HideDone},
 		{k.Help, k.Quit},
 	}
 }
