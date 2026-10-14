@@ -220,6 +220,7 @@ func (q *Queue) run(ctx context.Context, j *Job, s Settings) {
 		},
 		log:  func(line string) { update(line, func() {}) },
 		note: func(note string) { update("", func() { j.Note = note }) },
+		step: func(step string) { update("", func() { j.Step = step }) },
 	})
 
 	q.mu.Lock()

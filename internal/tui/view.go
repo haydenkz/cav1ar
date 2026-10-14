@@ -207,7 +207,7 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 		if j.Duration > 0 {
 			bar, pct = m.bar.ViewAs(j.Progress), fmt.Sprintf("%3.0f%%", j.Progress*100)
 		} else {
-			bar = m.st.dim.Render(cell(working(j.Action), c.bar))
+			bar = m.st.dim.Render(cell(working(j), c.bar))
 		}
 		info = cell(runningInfo(j), c.info)
 		if m.paused {
@@ -248,8 +248,11 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 
 // working says what a running job is doing before it reports progress: still
 // looking the file over, until it has decided what the file needs.
-func working(a encode.Action) string {
-	switch a {
+func working(j encode.Job) string {
+	if j.Step != "" {
+		return j.Step + "…"
+	}
+	switch j.Action {
 	case encode.ActionRemux:
 		return "remuxing…"
 	case encode.ActionEncode:
@@ -272,10 +275,15 @@ func actionName(a encode.Action) string {
 
 func runningInfo(j encode.Job) string {
 	var parts []string
-	if name := actionName(j.Action); name != "" {
-		parts = append(parts, name)
+	label := actionName(j.Action)
+	if j.Step != "" {
+		label = j.Step
 	}
-	if j.FPS > 0 && j.Action != encode.ActionRemux { // a remux copies frames, so its rate means little
+	if label != "" {
+		parts = append(parts, label)
+	}
+	// A remux copies frames, as does adding a preroll, so their rate means little.
+	if j.FPS > 0 && j.Action != encode.ActionRemux && j.Step == "" {
 		parts = append(parts, fmt.Sprintf("%.0f fps", j.FPS))
 	}
 	switch {

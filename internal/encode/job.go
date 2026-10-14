@@ -44,6 +44,7 @@ type Job struct {
 	Input  string
 	Output string // where the result goes, once decided; the same as Input when nothing needed doing
 	Action Action // what the job decided the file needs, once it has
+	Step   string // what it's doing beyond that, such as "adding preroll"
 	State  State
 
 	Progress float64       // 0..1; stays 0 when Duration is unknown
@@ -102,6 +103,7 @@ type updates struct {
 	progress func(progress)
 	log      func(line string)
 	note     func(note string) // sets Job.Note
+	step     func(step string) // sets Job.Step
 }
 
 type progress struct {

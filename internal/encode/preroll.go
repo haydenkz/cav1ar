@@ -310,6 +310,7 @@ func av1Config(ctx context.Context, path string) ([]byte, error) {
 
 // addPreroll writes main, with the preroll ahead of it, to out.
 func addPreroll(ctx context.Context, s Settings, main string, mainInfo mediaInfo, out string, u updates) (time.Duration, error) {
+	u.step("adding preroll")
 	pre, length, err := prerollFor(ctx, s, main, mainInfo, u)
 	if err != nil {
 		return 0, err
