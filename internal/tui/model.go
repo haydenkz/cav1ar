@@ -45,6 +45,8 @@ type Backend interface {
 	Retry(id int)
 	SetPaused(paused bool)
 	Paused() bool
+	SetHolding(holding bool) // hold back new jobs, letting running ones finish
+	Holding() bool
 	Jobs() []encode.Job
 	Next() []encode.Event
 	Settings() encode.Settings
@@ -72,6 +74,7 @@ type Model struct {
 	queue    Backend
 	settings encode.Settings
 	paused   bool
+	holding  bool // no new jobs start; running ones finish
 	screen   screen
 	lost     bool // the daemon whose queue this showed has gone
 	placed   bool // the cursor has been put on the daemon's current job
@@ -110,6 +113,7 @@ func New(q Backend) Model {
 		queue:    q,
 		settings: q.Settings(),
 		paused:   q.Paused(),
+		holding:  q.Holding(),
 		keys:     defaultKeys(),
 		help:     help.New(),
 		spin:     spinner.New(spinner.WithSpinner(spinner.MiniDot)),
@@ -157,7 +161,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		cmds = append(cmds, cmd)
 		// Another UI, or the settings file, may have changed these.
-		m.settings, m.paused = m.queue.Settings(), m.queue.Paused()
+		m.settings, m.paused, m.holding = m.queue.Settings(), m.queue.Paused(), m.queue.Holding()
+		m.setPauseHelp()
 	case clearStatusMsg:
 		if msg.id == m.statusID {
 			m.status = ""
@@ -234,13 +239,23 @@ func (m *Model) queueKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, m.keys.Settings):
 		return m.openSettings(newDraft(m.settings))
 	case key.Matches(msg, m.keys.Pause):
+		m.holding = !m.holding
+		m.queue.SetHolding(m.holding)
+		m.setPauseHelp()
+		switch {
+		case !m.holding:
+			return m.setStatus("Carrying on", false)
+		case m.count(encode.Running) > 0:
+			return m.setStatus("Pausing once the running jobs finish. Press p to carry on.", false)
+		}
+		return m.setStatus("Paused. Press p to carry on.", false)
+	case key.Matches(msg, m.keys.PauseNow):
 		m.paused = !m.paused
 		m.queue.SetPaused(m.paused)
+		m.setPauseHelp()
 		if m.paused {
-			m.keys.Pause.SetHelp("p", "resume")
-			return m.setStatus("Paused. Press p to carry on where it left off.", false)
+			return m.setStatus("Paused. Press P to carry on where it left off.", false)
 		}
-		m.keys.Pause.SetHelp("p", "pause")
 		return m.setStatus("Resumed", false)
 	case key.Matches(msg, m.keys.Help):
 		m.help.ShowAll = !m.help.ShowAll
@@ -311,6 +326,20 @@ func (m *Model) selectJob(i int) {
 	m.cursor = i
 	m.follow = true
 	m.logDirty = true
+}
+
+// setPauseHelp words the pause keys for what pressing them would do now.
+func (m *Model) setPauseHelp() {
+	if m.holding {
+		m.keys.Pause.SetHelp("p", "carry on")
+	} else {
+		m.keys.Pause.SetHelp("p", "pause after these")
+	}
+	if m.paused {
+		m.keys.PauseNow.SetHelp("P", "resume")
+	} else {
+		m.keys.PauseNow.SetHelp("P", "pause now")
+	}
 }
 
 // rows lists the jobs the list shows, by index: all of them, or when

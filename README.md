@@ -40,8 +40,9 @@ it shows what the daemon is doing, and adding, pausing, canceling and
 retrying act on the daemon's jobs, which carry on once the UI closes. Pass
 `-local` for a queue of the UI's own instead.
 
-In the UI, press `a` to add files, `s` for settings, `p` to pause, and `?` for
-all keys. In the file browser, `w` watches a folder; press it again to watch
+In the UI, press `a` to add files, `s` for settings, `p` to pause once the
+running jobs finish (`P` pauses them where they are), `h` to hide finished
+jobs, and `?` for all keys. In the file browser, `w` watches a folder; press it again to watch
 it as movies or shows.
 
 Settings are saved to `~/.config/cav1ar/config.json`. A running daemon picks

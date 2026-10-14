@@ -56,14 +56,18 @@ func (m Model) header() string {
 	case m.queue.Daemon():
 		left += m.st.okText.Render("daemon") + "  "
 	}
+	// Ahead of the settings, which can run past the edge.
+	switch n := m.count(encode.Running); {
+	case m.paused, m.holding && n == 0:
+		left += m.st.warnText.Render("⏸ paused") + "  "
+	case m.holding:
+		left += m.st.warnText.Render(fmt.Sprintf("⏸ pausing once %d %s", n, plural(n, "job finishes", "jobs finish"))) + "  "
+	}
 	left += m.st.dim.Render(m.settings.Summary())
 	if n := len(m.settings.Watch); n > 0 && m.queue.Watching() {
 		left += "  " + m.st.okText.Render(fmt.Sprintf("watching %d %s", n, plural(n, "folder", "folders")))
 	} else if n > 0 {
 		left += "  " + m.st.dim.Render("folders watched by another cav1ar")
-	}
-	if m.paused {
-		left += "  " + m.st.warnText.Render("⏸ paused")
 	}
 
 	var parts []string

@@ -9,7 +9,8 @@ type keyMap struct {
 	Cancel, Retry  key.Binding
 	HideDone       key.Binding
 	Add, Settings  key.Binding
-	Pause          key.Binding
+	Pause          key.Binding // once the running jobs finish
+	PauseNow       key.Binding // suspending the running jobs
 	Help, Quit     key.Binding
 
 	// Add-files screen.
@@ -34,7 +35,8 @@ func defaultKeys() keyMap {
 		HideDone:  key.NewBinding(key.WithKeys("h"), key.WithHelp("h", "hide done")),
 		Add:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add files")),
 		Settings:  key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "settings")),
-		Pause:     key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause")),
+		Pause:     key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "pause after these")),
+		PauseNow:  key.NewBinding(key.WithKeys("P"), key.WithHelp("P", "pause now")),
 		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "more")),
 		Quit:      key.NewBinding(key.WithKeys("q"), key.WithHelp("q", "quit")),
 		AddItem:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add highlighted (folders too)")),
@@ -48,14 +50,15 @@ func defaultKeys() keyMap {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Add, k.Settings, k.Pause, k.Cancel, k.Retry, k.HideDone, k.Help, k.Quit}
+	return []key.Binding{k.Add, k.Settings, k.Pause, k.PauseNow, k.Cancel, k.Retry, k.HideDone, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down},
 		{k.LogUp, k.LogDown},
-		{k.Add, k.Settings, k.Pause},
+		{k.Add, k.Settings},
+		{k.Pause, k.PauseNow},
 		{k.Cancel, k.Retry, k.HideDone},
 		{k.Help, k.Quit},
 	}

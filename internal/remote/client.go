@@ -23,6 +23,7 @@ type Client struct {
 	pending  []encode.Event
 	settings encode.Settings
 	paused   bool
+	holding  bool
 	watching bool
 	closed   bool
 }
@@ -71,7 +72,7 @@ func (c *Client) apply(msg message) {
 	if msg.Settings != nil {
 		c.settings = *msg.Settings
 	}
-	c.paused, c.watching = msg.Paused, msg.Watching
+	c.paused, c.holding, c.watching = msg.Paused, msg.Holding, msg.Watching
 	for _, w := range msg.Jobs {
 		j := w.job()
 		c.jobs = append(c.jobs, j)
@@ -147,6 +148,19 @@ func (c *Client) Paused() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.paused
+}
+
+func (c *Client) SetHolding(holding bool) {
+	c.mu.Lock()
+	c.holding = holding
+	c.mu.Unlock()
+	c.send(request{Op: "hold", Holding: holding})
+}
+
+func (c *Client) Holding() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.holding
 }
 
 // Watching reports whether the daemon is the cav1ar watching folders.
