@@ -190,6 +190,7 @@ func (s *Server) sendLocked(msg message) {
 // hold up the daemon.
 func (s *Server) queueLocked(c *conn, msg message) {
 	msg.Paused, msg.Holding, msg.Watching = s.q.Paused(), s.q.Holding(), s.w.Active()
+	msg.Saved, msg.Results = s.w.Totals()
 	b, err := json.Marshal(msg)
 	if err != nil {
 		return

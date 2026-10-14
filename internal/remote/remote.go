@@ -40,6 +40,8 @@ type message struct {
 	Paused   bool             `json:"paused"`
 	Holding  bool             `json:"holding"`
 	Watching bool             `json:"watching"`
+	Saved    int64            `json:"saved"`   // over every run; see encode.Watcher.Totals
+	Results  int              `json:"results"` // over every run
 }
 
 // job is an encode.Job with its error as text, which JSON can carry.

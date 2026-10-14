@@ -215,6 +215,14 @@ func (m Model) progressSummary() string {
 	case saved < 0:
 		parts = append(parts, fmtSize(-saved)+" bigger")
 	}
+	// Over every run, which outlasts the jobs listed here.
+	if all, n := m.queue.Totals(); n > 0 && all != saved {
+		if all >= 0 {
+			parts = append(parts, fmt.Sprintf("%s saved over %d %s in all", fmtSize(all), n, plural(n, "file", "files")))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s bigger over %d %s in all", fmtSize(-all), n, plural(n, "file", "files")))
+		}
+	}
 	return strings.Join(parts, " · ")
 }
 
