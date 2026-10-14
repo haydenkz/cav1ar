@@ -75,8 +75,13 @@ too*, and cav1ar checks every video in the library against your settings and
 queues only the ones that don't match. What it has found is remembered in
 `~/.config/cav1ar/cav1ar.db`, including which files still need work, so later
 scans only look at new and changed files, until the settings change, and a
-restart queues the rest again straight away. Every finished job is kept there
-too, so the UI can say how much space has been saved over every run.
+restart queues the rest again straight away. Every finished job is kept
+there too, so the UI can say how much space has been saved over every run.
+
+Videos that arrive in a watched folder go ahead of the library already there,
+marked *up next*, so new downloads don't wait behind a long backlog. The job
+list is in the order jobs run: those that have started, then those up next,
+then the rest.
 
 Results are written to a hidden file next to the original, and only take its
 place once every track is checked to run its full length. With *delete

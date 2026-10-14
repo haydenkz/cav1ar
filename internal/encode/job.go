@@ -46,6 +46,7 @@ type Job struct {
 	Action Action // what the job decided the file needs, once it has
 	Step   string // what it's doing beyond that, such as "adding preroll"
 	State  State
+	Next   bool // queued ahead of the rest, such as a video that has just arrived
 
 	Progress float64       // 0..1; stays 0 when Duration is unknown
 	FPS      float64       // encoder frames per second

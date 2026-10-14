@@ -77,6 +77,7 @@ func (s *stateDB) Close() error { return s.db.Close() }
 // savedState is what a Watcher reads back.
 type savedState struct {
 	settings string
+	scanned  time.Time // when the state was last saved, at the end of a scan
 	folders  map[string]bool
 	files    map[string]fileState
 }
@@ -85,6 +86,14 @@ func (s *stateDB) load() (savedState, error) {
 	st := savedState{folders: map[string]bool{}, files: map[string]fileState{}}
 	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'settings'`).Scan(&st.settings)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return st, err
+	}
+	var scanned int64
+	err = s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'scanned'`).Scan(&scanned)
+	switch {
+	case err == nil:
+		st.scanned = time.Unix(scanned, 0)
+	case !errors.Is(err, sql.ErrNoRows):
 		return st, err
 	}
 	rows, err := s.db.Query(`SELECT path FROM folders`)
@@ -117,16 +126,19 @@ func (s *stateDB) load() (savedState, error) {
 }
 
 // save writes the settings fingerprint and folders, and the given files:
-// each path's state, or nil for one to forget.
+// each path's state, or nil for one to forget. It notes the time too, which
+// says which videos arrive after it.
 func (s *stateDB) save(settings string, folders map[string]bool, files map[string]*fileState) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES ('settings', ?)
-		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, settings); err != nil {
-		return err
+	for k, v := range map[string]any{"settings": settings, "scanned": time.Now().Unix()} {
+		if _, err := tx.Exec(`INSERT INTO meta (key, value) VALUES (?, ?)
+			ON CONFLICT (key) DO UPDATE SET value = excluded.value`, k, v); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(`DELETE FROM folders`); err != nil {
 		return err

@@ -42,10 +42,16 @@ func NewQueue(ctx context.Context, s Settings) *Queue {
 }
 
 // Add queues an encode of in. Its output path is chosen when it starts.
-func (q *Queue) Add(in string) {
+func (q *Queue) Add(in string) { q.add(in, false) }
+
+// AddNext queues an encode of in ahead of everything queued with Add, behind
+// anything queued with AddNext before it.
+func (q *Queue) AddNext(in string) { q.add(in, true) }
+
+func (q *Queue) add(in string, next bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	j := &Job{ID: len(q.jobs), Input: in, State: Queued}
+	j := &Job{ID: len(q.jobs), Input: in, State: Queued, Next: next}
 	if fi, err := os.Stat(in); err == nil {
 		j.InSize = fi.Size()
 	}
@@ -77,7 +83,7 @@ func (q *Queue) Retry(id int) {
 	if j == nil || (j.State != Failed && j.State != Canceled) {
 		return
 	}
-	*j = Job{ID: j.ID, Input: j.Input, InSize: j.InSize, State: Queued}
+	*j = Job{ID: j.ID, Input: j.Input, InSize: j.InSize, State: Queued, Next: j.Next}
 	q.emitLocked(*j, "")
 	q.dispatchLocked()
 }
@@ -193,21 +199,25 @@ func (q *Queue) dispatchLocked() {
 	if q.paused || q.holding || q.closed || q.ctx.Err() != nil {
 		return
 	}
-	for _, j := range q.jobs {
-		if q.running >= q.settings.Workers {
-			return
+	// Jobs queued with AddNext go first, then the rest, each in the order
+	// they were added.
+	for _, next := range []bool{true, false} {
+		for _, j := range q.jobs {
+			if q.running >= q.settings.Workers {
+				return
+			}
+			if j.State != Queued || j.Next != next {
+				continue
+			}
+			ctx, cancel := context.WithCancel(q.ctx)
+			q.cancels[j.ID] = cancel
+			q.running++
+			j.State = Running
+			j.Started = time.Now()
+			q.emitLocked(*j, "")
+			s := q.settings
+			q.wg.Go(func() { q.run(ctx, j, s) })
 		}
-		if j.State != Queued {
-			continue
-		}
-		ctx, cancel := context.WithCancel(q.ctx)
-		q.cancels[j.ID] = cancel
-		q.running++
-		j.State = Running
-		j.Started = time.Now()
-		q.emitLocked(*j, "")
-		s := q.settings
-		q.wg.Go(func() { q.run(ctx, j, s) })
 	}
 }
 

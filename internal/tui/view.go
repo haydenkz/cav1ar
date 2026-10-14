@@ -153,8 +153,7 @@ func (m Model) pickerTitle() string {
 func (m Model) jobsTitle() string {
 	title := "Jobs"
 	if shown := m.rows(); len(shown) > m.jobsH-2 {
-		at, _ := slices.BinarySearch(shown, m.cursor)
-		title = fmt.Sprintf("Jobs %d/%d", at+1, len(shown))
+		title = fmt.Sprintf("Jobs %d/%d", slices.Index(shown, m.cursor)+1, len(shown))
 	}
 	if n := m.count(encode.Done) + m.count(encode.Canceled); m.hideDone && n > 0 {
 		title += fmt.Sprintf(" · %d finished hidden", n)
@@ -278,6 +277,9 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 	case encode.Queued:
 		icon = m.st.dim.Render("○")
 		bar = m.st.dim.Render(cell("queued", c.bar))
+		if j.Next {
+			icon, bar = m.st.selected.Render("○"), m.st.selected.Render(cell("up next", c.bar))
+		}
 		if j.InSize > 0 {
 			info = m.st.dim.Render(cell(fmtSize(j.InSize), c.info))
 		}
