@@ -304,7 +304,11 @@ func fingerprint(s Settings) string {
 	}{s.MaxHeight, s.AudioCodec, s.AudioKbps == AudioCopy, s.Downmix, s.Language, s.AudioTracks, s.Subtitles,
 		s.TidySubs, s.StripMetadata, s.Title, s.ReleaseGroup, s.NameTemplate, s.OutDir, s.Watch, s.Preroll}
 	if s.Preroll != "" {
-		key.Preroll, _ = prerollID(s.Preroll) // a new clip at the same path counts as a change
+		// A new clip at the same path counts as a change. One that can't be
+		// read keeps its path, so it still differs from having none.
+		if id, err := prerollID(s.Preroll); err == nil {
+			key.Preroll = id
+		}
 	}
 	data, _ := json.Marshal(key)
 	sum := sha256.Sum256(data)
