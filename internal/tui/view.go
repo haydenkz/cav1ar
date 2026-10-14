@@ -163,7 +163,7 @@ const (
 )
 
 func columnsFor(w int) columns {
-	c := columns{bar: min(max(w/4, 10), 30), info: 30}
+	c := columns{bar: min(max(w/4, 10), 30), info: 38}
 	c.name = w - gutterW - iconW - c.bar - percentW - c.info - 3
 	if c.name < 16 { // too narrow for the info column, so drop it
 		c.name += c.info + 1
@@ -207,7 +207,7 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 		if j.Duration > 0 {
 			bar, pct = m.bar.ViewAs(j.Progress), fmt.Sprintf("%3.0f%%", j.Progress*100)
 		} else {
-			bar = m.st.dim.Render(cell("encoding…", c.bar))
+			bar = m.st.dim.Render(cell(working(j.Action), c.bar))
 		}
 		info = cell(runningInfo(j), c.info)
 		if m.paused {
@@ -246,12 +246,42 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 	return row
 }
 
+// working says what a running job is doing before it reports progress: still
+// looking the file over, until it has decided what the file needs.
+func working(a encode.Action) string {
+	switch a {
+	case encode.ActionRemux:
+		return "remuxing…"
+	case encode.ActionEncode:
+		return "encoding…"
+	}
+	return "checking…"
+}
+
+// actionName is a short name for what a job does to its file, or "" if it
+// hasn't decided yet.
+func actionName(a encode.Action) string {
+	switch a {
+	case encode.ActionRemux:
+		return "remux"
+	case encode.ActionEncode:
+		return "encode"
+	}
+	return ""
+}
+
 func runningInfo(j encode.Job) string {
 	var parts []string
-	if j.FPS > 0 {
+	if name := actionName(j.Action); name != "" {
+		parts = append(parts, name)
+	}
+	if j.FPS > 0 && j.Action != encode.ActionRemux { // a remux copies frames, so its rate means little
 		parts = append(parts, fmt.Sprintf("%.0f fps", j.FPS))
 	}
-	if j.Speed > 0 {
+	switch {
+	case j.Speed >= 10:
+		parts = append(parts, fmt.Sprintf("%.0fx", j.Speed))
+	case j.Speed > 0:
 		parts = append(parts, fmt.Sprintf("%.2gx", j.Speed))
 	}
 	if eta := j.ETA(); eta > 0 {
@@ -262,6 +292,12 @@ func runningInfo(j encode.Job) string {
 
 func doneInfo(j encode.Job) string {
 	s := "in " + fmtDuration(j.Elapsed())
+	switch j.Action {
+	case encode.ActionRemux:
+		s = "remuxed " + s
+	case encode.ActionEncode:
+		s = "encoded " + s
+	}
 	if j.InSize > 0 && j.OutSize > 0 {
 		s += fmt.Sprintf(" · %s (%+.0f%%)", fmtSize(j.OutSize),
 			(float64(j.OutSize)/float64(j.InSize)-1)*100)
