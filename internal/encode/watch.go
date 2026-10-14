@@ -125,6 +125,9 @@ func (w *Watcher) acquire() bool {
 	for _, f := range w.q.Settings().Watch {
 		removeStaleTemps(f.Path)
 	}
+	if dir, err := workDir(); err == nil {
+		removeStaleTemps(dir)
+	}
 	return true
 }
 
@@ -297,8 +300,16 @@ func fingerprint(s Settings) string {
 		TidySubs, StripMetadata        bool
 		Title, ReleaseGroup, Name, Out string
 		Watch                          []WatchFolder
+		Preroll                        string
 	}{s.MaxHeight, s.AudioCodec, s.AudioKbps == AudioCopy, s.Downmix, s.Language, s.AudioTracks, s.Subtitles,
-		s.TidySubs, s.StripMetadata, s.Title, s.ReleaseGroup, s.NameTemplate, s.OutDir, s.Watch}
+		s.TidySubs, s.StripMetadata, s.Title, s.ReleaseGroup, s.NameTemplate, s.OutDir, s.Watch, s.Preroll}
+	if s.Preroll != "" {
+		// A new clip at the same path counts as a change. One that can't be
+		// read keeps its path, so it still differs from having none.
+		if id, err := prerollID(s.Preroll); err == nil {
+			key.Preroll = id
+		}
+	}
 	data, _ := json.Marshal(key)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:8])
@@ -366,9 +377,34 @@ func removeStaleTemps(root string) {
 		if err != nil || d.IsDir() || !IsTemp(path) {
 			return nil
 		}
-		if fi, err := d.Info(); err == nil && time.Since(fi.ModTime()) > staleTemp {
+		if fi, err := d.Info(); err == nil && time.Since(fi.ModTime()) > staleTemp && !tempInUse(path) {
 			os.Remove(path)
 		}
 		return nil
 	})
+}
+
+// holdTemp marks path, a result or intermediate a job is about to write, as
+// in use until release is called. removeStaleTemps in any cav1ar then leaves
+// it be, however long a pause leaves it untouched.
+func holdTemp(path string) (release func(), err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() { f.Close() }, nil
+}
+
+// tempInUse reports whether a job holds path.
+func tempInUse(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil
 }

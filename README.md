@@ -40,8 +40,9 @@ it shows what the daemon is doing, and adding, pausing, canceling and
 retrying act on the daemon's jobs, which carry on once the UI closes. Pass
 `-local` for a queue of the UI's own instead.
 
-In the UI, press `a` to add files, `s` for settings, `p` to pause, and `?` for
-all keys. In the file browser, `w` watches a folder; press it again to watch
+In the UI, press `a` to add files, `s` for settings, `p` to pause once the
+running jobs finish (`P` pauses them where they are), `h` to hide finished
+jobs, and `?` for all keys. In the file browser, `w` watches a folder; press it again to watch
 it as movies or shows.
 
 Settings are saved to `~/.config/cav1ar/config.json`. A running daemon picks
@@ -78,6 +79,22 @@ Results are written to a hidden file next to the original, and only take its
 place once every track is checked to run its full length. With *delete
 originals* on, a file whose name doesn't change is replaced in place.
 `-retry-failed` gives files that failed another go.
+
+## Prerolls
+
+Settings → Output → **Preroll** (or `-preroll`) takes a clip to play before
+every result, such as an intro. There's none unless you set one. The clip is
+encoded once for each kind of video it meets, matching it down to the AV1
+settings, then joined on without re-encoding the video, so players see one
+continuous stream. Matching is best effort: when the encoder can't reproduce
+the video's AV1 sequence header, the log says so, since some players may
+stutter where the two meet. The file it's joined onto is kept in
+`~/.cache/cav1ar/work`, so the library's disks only read the source and write
+the result.
+
+Each result records which clip it starts with and how long it runs, so a
+preroll is never added twice. Changing the clip swaps it in every file that
+has one, and clearing it takes it back out, rewriting each of those files.
 
 ## Background service
 

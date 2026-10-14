@@ -68,6 +68,11 @@ func prepare(ctx context.Context, in string, s Settings, log func(string)) (*pla
 	if err != nil {
 		return nil, err
 	}
+	if p.prerollIn > 0 && p.action() != ActionNone && p.action() != ActionRename {
+		if p.prerollIn, err = joinPoint(ctx, in, p.prerollIn); err != nil {
+			return nil, err
+		}
+	}
 	if s.TidySubs && len(p.subs) > 0 && (p.checkSubs || p.action() == ActionRemux || p.action() == ActionEncode) {
 		log("cav1ar: reading the subtitles")
 		stats, err := readSubs(ctx, in, p.subs)
@@ -119,29 +124,75 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 	}
 
 	tmp := tempPath(out)
+	if s.Preroll != "" {
+		// This is only an intermediate the preroll is joined onto, so keep it
+		// off the library's storage, which then only reads the source and
+		// writes the result.
+		dir, err := workDir()
+		if err != nil {
+			return err
+		}
+		tmp = filepath.Join(dir, filepath.Base(tmp))
+	}
+	release, err := holdTemp(tmp)
+	if err != nil {
+		return err
+	}
+	defer release()
 	defer os.Remove(tmp) // gone already, once the result is in place
 	hwDecode := []bool{false}
 	if action == ActionEncode && s.Encoder == EncoderNVIDIA {
 		hwDecode = []bool{true, false}
 	}
-	for i, hw := range hwDecode {
-		args := p.args(tmp, hw)
-		u.log("cav1ar: ffmpeg " + strings.Join(args, " "))
-		err = runFFmpeg(ctx, args, info.Duration, u)
-		if err == nil || ctx.Err() != nil || i == len(hwDecode)-1 {
+	var mainInfo mediaInfo
+	for {
+		for i, hw := range hwDecode {
+			args := p.args(tmp, hw)
+			u.log("cav1ar: ffmpeg " + strings.Join(args, " "))
+			err = runFFmpeg(ctx, args, info.Duration, u)
+			if err == nil || ctx.Err() != nil || i == len(hwDecode)-1 {
+				break
+			}
+			u.log("cav1ar: decoding on the GPU failed (" + err.Error() + "), so trying again on the CPU")
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return err
+		}
+		if mainInfo, err = verify(ctx, tmp, p); err == nil || p.subsApart || len(p.subs) == 0 {
 			break
 		}
-		u.log("cav1ar: decoding on the GPU failed (" + err.Error() + "), so trying again on the CPU")
-	}
-	if ctx.Err() != nil {
-		return ctx.Err()
+		// ffmpeg can stop feeding the other tracks, without saying so, once
+		// a sparse subtitle track has had its say: one with a single forced
+		// line, say. Reading the subtitles separately gets around that.
+		u.log("cav1ar: the result failed its checks (" + err.Error() + "), so trying again with the subtitles read separately")
+		p.subsApart = true
 	}
 	if err != nil {
-		return err
-	}
-
-	if err := verify(ctx, tmp, p); err != nil {
 		return fmt.Errorf("the result failed its checks, so the original was kept: %w", err)
+	}
+	if s.Preroll != "" {
+		joined := tempPath(out)
+		release, err := holdTemp(joined)
+		if err != nil {
+			return err
+		}
+		defer release()
+		defer os.Remove(joined)
+		length, err := addPreroll(ctx, s, tmp, mainInfo, joined, u)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return fmt.Errorf("adding the preroll: %w", err)
+		}
+		if err := checkJoin(ctx, joined, mainInfo, length); err != nil {
+			return fmt.Errorf("the result with the preroll failed its checks, so the original was kept: %w", err)
+		}
+		os.Remove(tmp)
+		tmp = joined
 	}
 	if out == in {
 		if err := os.Rename(tmp, out); err != nil {
@@ -209,10 +260,10 @@ func runFFmpeg(ctx context.Context, args []string, duration time.Duration, u upd
 // AV1 video and the tracks planned, and its video and audio must run as long
 // as the source's did. ffmpeg has exited cleanly on encodes whose audio
 // stopped an hour early.
-func verify(ctx context.Context, out string, p *plan) error {
+func verify(ctx context.Context, out string, p *plan) (mediaInfo, error) {
 	info, err := probe(ctx, out)
 	if err != nil {
-		return fmt.Errorf("it couldn't be read: %w", err)
+		return info, fmt.Errorf("it couldn't be read: %w", err)
 	}
 	count := map[string]int{}
 	for _, st := range info.Streams {
@@ -221,16 +272,16 @@ func verify(ctx context.Context, out string, p *plan) error {
 		}
 		count[st.Type]++
 		if st.Type == "video" && st.Codec != "av1" {
-			return errors.New("its video isn't AV1")
+			return info, errors.New("its video isn't AV1")
 		}
 	}
 	switch {
 	case count["video"] != 1:
-		return fmt.Errorf("it has %d video tracks, not 1", count["video"])
+		return info, fmt.Errorf("it has %d video tracks, not 1", count["video"])
 	case count["audio"] != len(p.audio):
-		return fmt.Errorf("it has %d audio tracks, not %d", count["audio"], len(p.audio))
+		return info, fmt.Errorf("it has %d audio tracks, not %d", count["audio"], len(p.audio))
 	case count["subtitle"] != len(p.subs):
-		return fmt.Errorf("it has %d subtitle tracks, not %d", count["subtitle"], len(p.subs))
+		return info, fmt.Errorf("it has %d subtitle tracks, not %d", count["subtitle"], len(p.subs))
 	}
 
 	srcLen, outLen := longestPlayed(p.sources()), longestPlayed(info.Streams)
@@ -238,9 +289,12 @@ func verify(ctx context.Context, out string, p *plan) error {
 		srcLen, outLen = p.info.Duration, info.Duration
 	}
 	if srcLen > 0 && srcLen-outLen > tolerance(srcLen) {
-		return fmt.Errorf("it runs %s but the source runs %s", outLen.Round(time.Second), srcLen.Round(time.Second))
+		return info, fmt.Errorf("it runs %s but the source runs %s", outLen.Round(time.Second), srcLen.Round(time.Second))
 	}
-	return checkStreamLengths(info, p)
+	if p.prerollIn > 0 && outLen-srcLen > p.prerollIn/2 {
+		return info, errors.New("the source's preroll wasn't cut off")
+	}
+	return info, checkStreamLengths(info, p)
 }
 
 // sources are the source streams the plan keeps.

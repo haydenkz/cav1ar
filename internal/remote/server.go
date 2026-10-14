@@ -120,6 +120,11 @@ func (s *Server) read(c *conn) {
 			s.mu.Lock()
 			s.sendLocked(message{}) // tell every UI
 			s.mu.Unlock()
+		case "hold":
+			s.q.SetHolding(r.Holding)
+			s.mu.Lock()
+			s.sendLocked(message{})
+			s.mu.Unlock()
 		}
 	}
 }
@@ -184,7 +189,7 @@ func (s *Server) sendLocked(msg message) {
 // carries. A UI that falls far behind is disconnected rather than allowed to
 // hold up the daemon.
 func (s *Server) queueLocked(c *conn, msg message) {
-	msg.Paused, msg.Watching = s.q.Paused(), s.w.Active()
+	msg.Paused, msg.Holding, msg.Watching = s.q.Paused(), s.q.Holding(), s.w.Active()
 	b, err := json.Marshal(msg)
 	if err != nil {
 		return

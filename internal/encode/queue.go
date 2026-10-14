@@ -20,6 +20,7 @@ type Queue struct {
 	settings Settings
 	paused   bool
 	pausedAt time.Time
+	holding  bool // new jobs are held back, while running ones finish
 	closed   bool
 	running  int
 	jobs     []*Job
@@ -128,6 +129,22 @@ func (q *Queue) Paused() bool {
 	return q.paused
 }
 
+// SetHolding holds back new jobs while letting running ones finish, or lets
+// new ones start again.
+func (q *Queue) SetHolding(holding bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.holding = holding
+	q.dispatchLocked()
+}
+
+// Holding reports whether new jobs are held back.
+func (q *Queue) Holding() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.holding
+}
+
 // Jobs returns a snapshot of every job, in the order they were added.
 func (q *Queue) Jobs() []Job {
 	q.mu.Lock()
@@ -173,7 +190,7 @@ func (q *Queue) Close() {
 // dispatchLocked starts queued jobs, oldest first, until the worker limit is
 // reached. The caller must hold q.mu.
 func (q *Queue) dispatchLocked() {
-	if q.paused || q.closed || q.ctx.Err() != nil {
+	if q.paused || q.holding || q.closed || q.ctx.Err() != nil {
 		return
 	}
 	for _, j := range q.jobs {
@@ -220,6 +237,7 @@ func (q *Queue) run(ctx context.Context, j *Job, s Settings) {
 		},
 		log:  func(line string) { update(line, func() {}) },
 		note: func(note string) { update("", func() { j.Note = note }) },
+		step: func(step string) { update("", func() { j.Step = step }) },
 	})
 
 	q.mu.Lock()

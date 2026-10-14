@@ -20,16 +20,20 @@ type mediaInfo struct {
 }
 
 type streamInfo struct {
-	Index    int
-	Type     string // video, audio, subtitle, attachment or data
-	Codec    string
-	Channels int
-	Width    int
-	Height   int
-	BitRate  int
-	Duration time.Duration // how long this stream runs; 0 if the file doesn't say
-	Language string        // as tagged, e.g. "eng" or "en-US"; empty if untagged
-	Title    string
+	Index      int
+	Type       string // video, audio, subtitle, attachment or data
+	Codec      string
+	Channels   int
+	SampleRate int
+	Width      int
+	Height     int
+	PixFmt     string // e.g. yuv420p10le
+	FrameRate  string // e.g. 24000/1001
+	Level      int    // for AV1, seq_level_idx
+	BitRate    int
+	Duration   time.Duration // how long this stream runs; 0 if the file doesn't say
+	Language   string        // as tagged, e.g. "eng" or "en-US"; empty if untagged
+	Title      string
 
 	CoverArt        bool // a still image attached as a video stream
 	Default         bool
@@ -39,7 +43,7 @@ type streamInfo struct {
 
 	FieldOrder               string // "progressive", or tt, bb, tb or bt when interlaced
 	ColorPrimaries, ColorTrc string
-	ColorSpace               string
+	ColorSpace, ColorRange   string
 	Filename, Mimetype       string // attachments must keep these, or the file can't be written
 }
 
@@ -58,8 +62,8 @@ func probe(ctx context.Context, in string) (mediaInfo, error) {
 	out, err := exec.CommandContext(ctx, "ffprobe",
 		"-v", "error",
 		"-show_entries", "format=duration:format_tags"+
-			":stream=index,codec_type,codec_name,channels,width,height,bit_rate,duration"+
-			",field_order,color_primaries,color_transfer,color_space"+
+			":stream=index,codec_type,codec_name,channels,sample_rate,width,height,pix_fmt,level,bit_rate,duration"+
+			",r_frame_rate,avg_frame_rate,field_order,color_primaries,color_transfer,color_space,color_range"+
 			":stream_tags:stream_disposition",
 		"-of", "json",
 		in,
@@ -87,14 +91,20 @@ func probe(ctx context.Context, in string) (mediaInfo, error) {
 			CodecType      string            `json:"codec_type"`
 			CodecName      string            `json:"codec_name"`
 			Channels       int               `json:"channels"`
+			SampleRate     string            `json:"sample_rate"`
 			Width          int               `json:"width"`
 			Height         int               `json:"height"`
+			PixFmt         string            `json:"pix_fmt"`
+			Level          int               `json:"level"`
 			BitRate        string            `json:"bit_rate"`
 			Duration       string            `json:"duration"`
+			FrameRate      string            `json:"r_frame_rate"`
+			AvgFrameRate   string            `json:"avg_frame_rate"`
 			FieldOrder     string            `json:"field_order"`
 			ColorPrimaries string            `json:"color_primaries"`
 			ColorTransfer  string            `json:"color_transfer"`
 			ColorSpace     string            `json:"color_space"`
+			ColorRange     string            `json:"color_range"`
 			Tags           map[string]string `json:"tags"`
 			Disposition    map[string]int    `json:"disposition"`
 		} `json:"streams"`
@@ -117,13 +127,22 @@ func probe(ctx context.Context, in string) (mediaInfo, error) {
 			lang = ""
 		}
 		bitRate, _ := strconv.Atoi(s.BitRate)
+		sampleRate, _ := strconv.Atoi(s.SampleRate)
+		rate := s.FrameRate
+		if fps, ok := ratio(rate); !ok || fps > 120 { // a timebase rather than a frame rate
+			rate = s.AvgFrameRate
+		}
 		st := streamInfo{
 			Index:           s.Index,
 			Type:            s.CodecType,
 			Codec:           s.CodecName,
 			Channels:        s.Channels,
+			SampleRate:      sampleRate,
 			Width:           s.Width,
 			Height:          s.Height,
+			PixFmt:          s.PixFmt,
+			FrameRate:       rate,
+			Level:           s.Level,
 			BitRate:         bitRate,
 			Duration:        seconds(s.Duration),
 			Language:        lang,
@@ -137,6 +156,7 @@ func probe(ctx context.Context, in string) (mediaInfo, error) {
 			ColorPrimaries:  s.ColorPrimaries,
 			ColorTrc:        s.ColorTransfer,
 			ColorSpace:      s.ColorSpace,
+			ColorRange:      s.ColorRange,
 			Filename:        tags["FILENAME"],
 			Mimetype:        tags["MIMETYPE"],
 		}
@@ -146,6 +166,17 @@ func probe(ctx context.Context, in string) (mediaInfo, error) {
 		info.Streams = append(info.Streams, st)
 	}
 	return info, nil
+}
+
+// ratio reads a frame rate such as "24000/1001".
+func ratio(s string) (float64, bool) {
+	num, den, ok := strings.Cut(s, "/")
+	n, err1 := strconv.ParseFloat(num, 64)
+	d, err2 := strconv.ParseFloat(den, 64)
+	if !ok || err1 != nil || err2 != nil || n <= 0 || d <= 0 {
+		return 0, false
+	}
+	return n / d, true
 }
 
 func seconds(s string) time.Duration {

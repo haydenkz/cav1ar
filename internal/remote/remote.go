@@ -23,10 +23,11 @@ func SocketPath() string {
 
 // request is something the UI asks the daemon to do.
 type request struct {
-	Op     string `json:"op"` // add, cancel, retry or pause
-	Path   string `json:"path,omitempty"`
-	ID     int    `json:"id,omitempty"`
-	Paused bool   `json:"paused,omitempty"`
+	Op      string `json:"op"` // add, cancel, retry, pause or hold
+	Path    string `json:"path,omitempty"`
+	ID      int    `json:"id,omitempty"`
+	Paused  bool   `json:"paused,omitempty"`
+	Holding bool   `json:"holding,omitempty"`
 }
 
 // message is what the daemon sends: everything when the UI connects, then
@@ -37,6 +38,7 @@ type message struct {
 	Events   []event          `json:"events,omitempty"`
 	Settings *encode.Settings `json:"settings,omitempty"` // when the UI connects, and when they change
 	Paused   bool             `json:"paused"`
+	Holding  bool             `json:"holding"`
 	Watching bool             `json:"watching"`
 }
 

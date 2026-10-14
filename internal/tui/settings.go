@@ -63,6 +63,11 @@ func (d *settingsDraft) settings() (encode.Settings, error) {
 	s.ReleaseGroup = strings.TrimSpace(s.ReleaseGroup)
 	s.NameTemplate = strings.TrimSpace(s.NameTemplate)
 	s.OutDir = expandHome(strings.TrimSpace(s.OutDir))
+	if s.Preroll = expandHome(strings.TrimSpace(s.Preroll)); s.Preroll != "" {
+		if abs, err := filepath.Abs(s.Preroll); err == nil {
+			s.Preroll = abs
+		}
+	}
 	s.Watch = folders(d.watch)
 	return s, s.Validate()
 }
@@ -95,7 +100,7 @@ var (
 		"encoder": 0, "crf": 0, "preset": 0, "nvencPreset": 0, "maxHeight": 0, "workers": 0,
 		"audio": 1, "downmix": 1, "language": 1, "audioTracks": 1, "subtitles": 1, "tidySubs": 1,
 		"strip": 2, "title": 2, "group": 2,
-		"name": 3, "outDir": 3, "deleteOriginal": 3,
+		"name": 3, "outDir": 3, "preroll": 3, "deleteOriginal": 3,
 		"watch": 4, "watchExisting": 4,
 	}
 )
@@ -290,6 +295,13 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 			Placeholder("next to the source").
 			Value(&d.OutDir).
 			Validate(validateDir),
+		huh.NewInput().Key("preroll").
+			Title("Preroll").
+			Description("A clip to play before every result, such as an intro. It's matched to each video\n"+
+				"and joined on without re-encoding it. Changing or clearing it rewrites every file that has it.").
+			Placeholder("none").
+			Value(&d.Preroll).
+			Validate(validateClip),
 		huh.NewSelect[bool]().Key("deleteOriginal").
 			Title("Original file").
 			Description("Deleting is permanent, and only happens once the encode checks out.").
@@ -461,6 +473,24 @@ func parseCRF(s string) (int, error) {
 		return 0, errors.New("enter a number from 1 to 63")
 	}
 	return n, nil
+}
+
+// validateClip accepts no clip, or a path to a file.
+func validateClip(s string) error {
+	s = expandHome(strings.TrimSpace(s))
+	if s == "" {
+		return nil
+	}
+	fi, err := os.Stat(s)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return errors.New("that file doesn't exist")
+	case err != nil:
+		return err
+	case fi.IsDir():
+		return errors.New("that's a folder, not a clip")
+	}
+	return nil
 }
 
 func validateDir(s string) error {

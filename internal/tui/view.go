@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,14 +56,18 @@ func (m Model) header() string {
 	case m.queue.Daemon():
 		left += m.st.okText.Render("daemon") + "  "
 	}
+	// Ahead of the settings, which can run past the edge.
+	switch n := m.count(encode.Running); {
+	case m.paused, m.holding && n == 0:
+		left += m.st.warnText.Render("⏸ paused") + "  "
+	case m.holding:
+		left += m.st.warnText.Render(fmt.Sprintf("⏸ pausing once %d %s", n, plural(n, "job finishes", "jobs finish"))) + "  "
+	}
 	left += m.st.dim.Render(m.settings.Summary())
 	if n := len(m.settings.Watch); n > 0 && m.queue.Watching() {
 		left += "  " + m.st.okText.Render(fmt.Sprintf("watching %d %s", n, plural(n, "folder", "folders")))
 	} else if n > 0 {
 		left += "  " + m.st.dim.Render("folders watched by another cav1ar")
-	}
-	if m.paused {
-		left += "  " + m.st.warnText.Render("⏸ paused")
 	}
 
 	var parts []string
@@ -146,11 +151,71 @@ func (m Model) pickerTitle() string {
 }
 
 func (m Model) jobsTitle() string {
-	rows := m.jobsH - 2
-	if len(m.jobs) > rows {
-		return fmt.Sprintf("Jobs %d/%d", m.cursor+1, len(m.jobs))
+	title := "Jobs"
+	if shown := m.rows(); len(shown) > m.jobsH-2 {
+		at, _ := slices.BinarySearch(shown, m.cursor)
+		title = fmt.Sprintf("Jobs %d/%d", at+1, len(shown))
 	}
-	return "Jobs"
+	if n := m.count(encode.Done) + m.count(encode.Canceled); m.hideDone && n > 0 {
+		title += fmt.Sprintf(" · %d finished hidden", n)
+	}
+	if s := m.progressSummary(); s != "" {
+		title += " · " + s
+	}
+	return title
+}
+
+// progressSummary says how much is left to do, about how long it will take
+// at the pace of the last hour, and how much smaller the results have come
+// out than their sources.
+func (m Model) progressSummary() string {
+	now := time.Now()
+	since := now.Add(-time.Hour) // the pace is taken over this hour, or since work began
+	began := now
+	var left, recent, saved int64
+	todo := 0
+	for _, j := range m.jobs {
+		if !j.Started.IsZero() && j.Started.Before(began) {
+			began = j.Started
+		}
+		worked := j.Action == encode.ActionRemux || j.Action == encode.ActionEncode
+		switch j.State {
+		case encode.Queued:
+			todo++
+			left += j.InSize
+		case encode.Running:
+			todo++
+			left += int64(float64(j.InSize) * (1 - j.Progress))
+		case encode.Done:
+			if worked && j.InSize > 0 && j.OutSize > 0 {
+				saved += j.InSize - j.OutSize
+			}
+			if worked && j.Finished.After(since) {
+				recent += j.InSize
+			}
+		}
+	}
+
+	var parts []string
+	if todo > 0 {
+		s := fmt.Sprintf("%d to do, %s", todo, fmtSize(left))
+		if began.After(since) {
+			since = began
+		}
+		// Guessing from less than a few minutes' work would swing about.
+		if window := now.Sub(since); window >= 5*time.Minute && recent > 0 {
+			eta := time.Duration(float64(left) / float64(recent) * float64(window))
+			s += ", about " + fmtRough(eta) + " left"
+		}
+		parts = append(parts, s)
+	}
+	switch {
+	case saved > 0:
+		parts = append(parts, "saved "+fmtSize(saved))
+	case saved < 0:
+		parts = append(parts, fmtSize(-saved)+" bigger")
+	}
+	return strings.Join(parts, " · ")
 }
 
 // columns are the widths of the parts of a job row, in cells.
@@ -179,10 +244,16 @@ func (m Model) jobList() string {
 			m.st.dim.Render(" to change settings.")
 		return ansi.Truncate(hint, m.width-4, "…")
 	}
+	shown := m.rows()
+	if len(shown) == 0 {
+		return m.st.dim.Render("Everything has finished. Press ") + m.st.selected.Render("h") +
+			m.st.dim.Render(" to show it.")
+	}
 	cols := columnsFor(m.width - 4)
-	end := min(m.offset+m.jobsH-2, len(m.jobs))
-	rows := make([]string, 0, end-m.offset)
-	for i := m.offset; i < end; i++ {
+	start := min(m.offset, len(shown))
+	end := min(start+m.jobsH-2, len(shown))
+	rows := make([]string, 0, end-start)
+	for _, i := range shown[start:end] {
 		rows = append(rows, m.jobRow(m.jobs[i], i == m.cursor, cols))
 	}
 	return strings.Join(rows, "\n")
@@ -207,7 +278,7 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 		if j.Duration > 0 {
 			bar, pct = m.bar.ViewAs(j.Progress), fmt.Sprintf("%3.0f%%", j.Progress*100)
 		} else {
-			bar = m.st.dim.Render(cell(working(j.Action), c.bar))
+			bar = m.st.dim.Render(cell(working(j), c.bar))
 		}
 		info = cell(runningInfo(j), c.info)
 		if m.paused {
@@ -248,8 +319,11 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 
 // working says what a running job is doing before it reports progress: still
 // looking the file over, until it has decided what the file needs.
-func working(a encode.Action) string {
-	switch a {
+func working(j encode.Job) string {
+	if j.Step != "" {
+		return j.Step + "…"
+	}
+	switch j.Action {
 	case encode.ActionRemux:
 		return "remuxing…"
 	case encode.ActionEncode:
@@ -272,10 +346,15 @@ func actionName(a encode.Action) string {
 
 func runningInfo(j encode.Job) string {
 	var parts []string
-	if name := actionName(j.Action); name != "" {
-		parts = append(parts, name)
+	label := actionName(j.Action)
+	if j.Step != "" {
+		label = j.Step
 	}
-	if j.FPS > 0 && j.Action != encode.ActionRemux { // a remux copies frames, so its rate means little
+	if label != "" {
+		parts = append(parts, label)
+	}
+	// A remux copies frames, as does adding a preroll, so their rate means little.
+	if j.FPS > 0 && j.Action != encode.ActionRemux && j.Step == "" {
 		parts = append(parts, fmt.Sprintf("%.0f fps", j.FPS))
 	}
 	switch {
@@ -322,6 +401,18 @@ func (m Model) logBody() string {
 		return m.st.dim.Render("No output yet")
 	}
 	return m.log.View()
+}
+
+// fmtRough rounds a long wait to what's worth knowing of it.
+func fmtRough(d time.Duration) string {
+	switch {
+	case d >= 10*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Round(time.Hour).Hours()))
+	case d >= time.Hour:
+		d = d.Round(10 * time.Minute)
+		return fmt.Sprintf("%dh%02dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%dm", int(max(d.Round(time.Minute), time.Minute).Minutes()))
 }
 
 func fmtDuration(d time.Duration) string {

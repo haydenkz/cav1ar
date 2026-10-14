@@ -44,6 +44,7 @@ type Job struct {
 	Input  string
 	Output string // where the result goes, once decided; the same as Input when nothing needed doing
 	Action Action // what the job decided the file needs, once it has
+	Step   string // what it's doing beyond that, such as "adding preroll"
 	State  State
 
 	Progress float64       // 0..1; stays 0 when Duration is unknown
@@ -78,6 +79,12 @@ func (j Job) ETA() time.Duration {
 	if j.State != Running || j.Progress <= 0 || j.Progress >= 1 {
 		return 0
 	}
+	if j.Speed > 0 && j.Duration > 0 {
+		// Going by the encoder's speed counts only the pass it's on, where
+		// time elapsed would count looking the file over first, and any
+		// earlier pass, as if they were part of this one.
+		return time.Duration(float64(j.Duration) * (1 - j.Progress) / j.Speed)
+	}
 	e := j.Elapsed()
 	return time.Duration(float64(e) * (1 - j.Progress) / j.Progress)
 }
@@ -96,6 +103,7 @@ type updates struct {
 	progress func(progress)
 	log      func(line string)
 	note     func(note string) // sets Job.Note
+	step     func(step string) // sets Job.Step
 }
 
 type progress struct {
