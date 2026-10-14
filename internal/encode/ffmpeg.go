@@ -139,23 +139,32 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 	if action == ActionEncode && s.Encoder == EncoderNVIDIA {
 		hwDecode = []bool{true, false}
 	}
-	for i, hw := range hwDecode {
-		args := p.args(tmp, hw)
-		u.log("cav1ar: ffmpeg " + strings.Join(args, " "))
-		err = runFFmpeg(ctx, args, info.Duration, u)
-		if err == nil || ctx.Err() != nil || i == len(hwDecode)-1 {
+	var mainInfo mediaInfo
+	for {
+		for i, hw := range hwDecode {
+			args := p.args(tmp, hw)
+			u.log("cav1ar: ffmpeg " + strings.Join(args, " "))
+			err = runFFmpeg(ctx, args, info.Duration, u)
+			if err == nil || ctx.Err() != nil || i == len(hwDecode)-1 {
+				break
+			}
+			u.log("cav1ar: decoding on the GPU failed (" + err.Error() + "), so trying again on the CPU")
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return err
+		}
+		if mainInfo, err = verify(ctx, tmp, p); err == nil || p.subsApart || len(p.subs) == 0 {
 			break
 		}
-		u.log("cav1ar: decoding on the GPU failed (" + err.Error() + "), so trying again on the CPU")
+		// ffmpeg can stop feeding the other tracks, without saying so, once
+		// a sparse subtitle track has had its say: one with a single forced
+		// line, say. Reading the subtitles separately gets around that.
+		u.log("cav1ar: the result failed its checks (" + err.Error() + "), so trying again with the subtitles read separately")
+		p.subsApart = true
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	if err != nil {
-		return err
-	}
-
-	mainInfo, err := verify(ctx, tmp, p)
 	if err != nil {
 		return fmt.Errorf("the result failed its checks, so the original was kept: %w", err)
 	}

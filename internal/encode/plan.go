@@ -94,6 +94,7 @@ type plan struct {
 	out       string   // where the result goes
 	notes     []string // choices worth showing the user, such as tracks left out
 	checkSubs bool     // subtitles need tidying before the plan is final
+	subsApart bool     // read the subtitles through a second opening of the source; see encodeFile
 
 	prerollHave string        // ID of the preroll the source starts with, if any
 	prerollIn   time.Duration // how long that preroll runs, which the job cuts off
@@ -470,12 +471,21 @@ func (p *plan) args(out string, hwDecode bool) []string {
 	if p.prerollIn > 0 { // cut off the preroll, which is added back afterwards if wanted
 		args = append(args, "-ss", seconds6(p.prerollIn))
 	}
-	args = append(args, "-i", p.in, "-map", "0:"+strconv.Itoa(p.video.Index))
+	args = append(args, "-i", p.in)
+	subsFrom := "0:"
+	if p.subsApart && len(p.subs) > 0 {
+		if p.prerollIn > 0 {
+			args = append(args, "-ss", seconds6(p.prerollIn))
+		}
+		args = append(args, "-i", p.in)
+		subsFrom = "1:"
+	}
+	args = append(args, "-map", "0:"+strconv.Itoa(p.video.Index))
 	for _, a := range p.audio {
 		args = append(args, "-map", "0:"+strconv.Itoa(a.Index))
 	}
 	for _, sub := range p.subs {
-		args = append(args, "-map", "0:"+strconv.Itoa(sub.Index))
+		args = append(args, "-map", subsFrom+strconv.Itoa(sub.Index))
 	}
 	for _, f := range p.fonts {
 		args = append(args, "-map", "0:"+strconv.Itoa(f.Index))
