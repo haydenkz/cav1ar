@@ -25,6 +25,8 @@ type Client struct {
 	paused   bool
 	holding  bool
 	watching bool
+	saved    int64
+	results  int
 	closed   bool
 }
 
@@ -73,6 +75,7 @@ func (c *Client) apply(msg message) {
 		c.settings = *msg.Settings
 	}
 	c.paused, c.holding, c.watching = msg.Paused, msg.Holding, msg.Watching
+	c.saved, c.results = msg.Saved, msg.Results
 	for _, w := range msg.Jobs {
 		j := w.job()
 		c.jobs = append(c.jobs, j)
@@ -161,6 +164,13 @@ func (c *Client) Holding() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.holding
+}
+
+// Totals is what the daemon's watcher has recorded over every run.
+func (c *Client) Totals() (saved int64, results int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.saved, c.results
 }
 
 // Watching reports whether the daemon is the cav1ar watching folders.

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -29,6 +30,7 @@ const (
 	fileKept   = "kept"   // an original kept beside its result
 	fileFailed = "failed" // its job failed; tried again once it changes, or when retrying failures
 	fileLeft   = "left"   // left alone: there before its folder was watched, or canceled
+	fileTodo   = "todo"   // queued; queued again on the next run without being read, unless it changes
 )
 
 // Watcher keeps the videos under a Queue's Settings.Watch folders, including
@@ -37,18 +39,39 @@ const (
 // over if it stops, so nothing is handled twice.
 type Watcher struct {
 	q           *Queue
-	state       string
+	state       string   // the state database
+	db          *stateDB // open while this Watcher is the one watching
 	lock        *os.File // held while this Watcher is the one watching
 	active      atomic.Bool
 	retryFailed bool // retry videos whose jobs failed
 
-	// Saved in the state file between runs.
+	// Saved in the state database between runs.
 	settings string               // fingerprint of the settings the files were checked against
 	folders  map[string]bool      // watched folders scanned before
 	files    map[string]fileState // what is known about each video
+	dirty    map[string]bool      // files changed since they were last saved
 
 	waiting  map[string]fileState // new or changed videos, as they looked on the last scan
 	recorded map[int]time.Time    // jobs whose outcome is in files, and when they finished
+	requeued map[string]bool      // videos found to need work on an earlier run, queued again on this one
+
+	saved, results atomic.Int64 // totals of every finished job that rewrote a file; see stateDB.totals
+}
+
+func (w *Watcher) setFile(path string, f fileState) {
+	w.files[path], w.dirty[path] = f, true
+}
+
+func (w *Watcher) forgetFile(path string) {
+	delete(w.files, path)
+	w.dirty[path] = true
+}
+
+// Totals says how much smaller the results of every job that rewrote a file
+// came out than their sources, and how many there were, across every run of
+// whichever cav1ar was watching. They're 0 when this Watcher isn't the one.
+func (w *Watcher) Totals() (saved int64, results int) {
+	return w.saved.Load(), int(w.results.Load())
 }
 
 type fileState struct {
@@ -70,14 +93,19 @@ func (f fileState) same(g fileState) bool { return f.Size == g.Size && f.Mod == 
 
 // Watch scans q's watched folders until ctx is done. Videos already in a
 // folder when it is first watched are left alone, unless the settings say
-// otherwise. What is known about each video is kept in the state file, so
-// one that arrives while cav1ar is closed is still picked up next time, and
-// one already checked isn't read again until it or the settings change.
-// retryFailed gives videos whose jobs failed another go.
+// otherwise. What is known about each video is kept in the state database at
+// state, so one that arrives while cav1ar is closed is still picked up next
+// time, and one already checked isn't read again until it or the settings
+// change. retryFailed gives videos whose jobs failed another go.
 func Watch(ctx context.Context, q *Queue, state string, retryFailed bool) *Watcher {
 	w := &Watcher{q: q, state: state, retryFailed: retryFailed}
 	go func() {
-		defer w.release()
+		defer func() {
+			if w.lock != nil {
+				w.recordJobs(ctx) // those that finished since the last scan
+			}
+			w.release()
+		}()
 		tick := time.NewTicker(watchInterval)
 		defer tick.Stop()
 		for {
@@ -105,7 +133,9 @@ func (w *Watcher) acquire() bool {
 	if os.MkdirAll(filepath.Dir(w.state), 0o755) != nil {
 		return false
 	}
-	lock, err := os.OpenFile(w.state+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	// The lock keeps the name it had when the state was kept in watch.json,
+	// so a cav1ar from before the database and one from after take turns.
+	lock, err := os.OpenFile(filepath.Join(filepath.Dir(w.state), "watch.json.lock"), os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return false
 	}
@@ -113,13 +143,31 @@ func (w *Watcher) acquire() bool {
 		lock.Close()
 		return false
 	}
-	w.lock = lock
+	db, err := openState(w.state)
+	if err != nil {
+		log.Printf("cav1ar: can't open %s, so not watching: %v", w.state, err)
+		lock.Close()
+		return false
+	}
+	st, err := db.load()
+	if err != nil {
+		log.Printf("cav1ar: can't read %s, so not watching: %v", w.state, err)
+		db.Close()
+		lock.Close()
+		return false
+	}
+	w.lock, w.db = lock, db
 	w.active.Store(true)
-	w.load()
+	w.settings, w.folders, w.files = st.settings, st.folders, st.files
+	w.dirty, w.requeued = map[string]bool{}, map[string]bool{}
+	if saved, results, err := db.totals(); err == nil {
+		w.saved.Store(saved)
+		w.results.Store(int64(results))
+	}
 	w.waiting, w.recorded = map[string]fileState{}, map[int]time.Time{}
 	for path, f := range w.files {
 		if f.Status == fileFailed && w.retryFailed {
-			delete(w.files, path)
+			w.forgetFile(path)
 		}
 	}
 	for _, f := range w.q.Settings().Watch {
@@ -133,9 +181,13 @@ func (w *Watcher) acquire() bool {
 
 func (w *Watcher) release() {
 	if w.lock != nil {
+		w.save()
+		w.db.Close()
 		w.lock.Close()
-		w.lock = nil
+		w.lock, w.db = nil, nil
 		w.active.Store(false)
+		w.saved.Store(0)
+		w.results.Store(0)
 	}
 }
 
@@ -154,7 +206,7 @@ func (w *Watcher) scan(ctx context.Context) {
 		// meant to be left alone.
 		for path, f := range w.files {
 			if f.Status != fileLeft && f.Status != fileKept {
-				delete(w.files, path)
+				w.forgetFile(path)
 			}
 		}
 		w.settings, changed = fp, true
@@ -185,11 +237,18 @@ func (w *Watcher) scan(ctx context.Context) {
 				continue
 			}
 			if known, ok := w.files[v]; ok && known.same(now) {
+				if known.Status == fileTodo && !w.requeued[v] {
+					// Found to need work on an earlier run, and unchanged
+					// since, so there's no need to read it again.
+					w.q.Add(v)
+					w.requeued[v] = true
+				}
 				continue
 			}
 			if leaveAlone {
 				now.Status = fileLeft
-				w.files[v], changed = now, true
+				w.setFile(v, now)
+				changed = true
 				continue
 			}
 			if last, ok := w.waiting[v]; !ok || !last.same(now) {
@@ -197,12 +256,14 @@ func (w *Watcher) scan(ctx context.Context) {
 				continue
 			}
 			delete(w.waiting, v)
+			now.Status = fileOK
 			if needsWork(ctx, v, s) {
 				w.q.Add(v)
-			} else {
-				now.Status = fileOK
-				w.files[v], changed = now, true
+				now.Status = fileTodo
+				w.requeued[v] = true
 			}
+			w.setFile(v, now)
+			changed = true
 			// Checking a big folder for the first time can take a while,
 			// so save as it goes.
 			if checked++; checked%100 == 0 {
@@ -216,7 +277,7 @@ func (w *Watcher) scan(ctx context.Context) {
 	// state file doesn't grow forever.
 	for path := range w.files {
 		if !present[path] && (scanned[folderPath(s, path)] || folderPath(s, path) == "") {
-			delete(w.files, path)
+			w.forgetFile(path)
 			changed = true
 		}
 	}
@@ -247,13 +308,26 @@ func needsWork(ctx context.Context, path string, s Settings) bool {
 	return err != nil || p.action() != ActionNone
 }
 
-// recordJobs notes what finished jobs did to the files they worked on.
+// recordJobs notes what finished jobs did to the files they worked on, and
+// adds them to the history.
 func (w *Watcher) recordJobs(ctx context.Context) bool {
 	changed := false
 	mark := func(path, status, note string) {
 		if f, ok := statFile(path); ok {
 			f.Status, f.Note = status, note
-			w.files[path], changed = f, true
+			w.setFile(path, f)
+			changed = true
+		}
+	}
+	record := func(j Job, result string) {
+		if err := w.db.addJob(j, result); err != nil {
+			log.Printf("cav1ar: can't add a job to the history: %v", err)
+			return
+		}
+		rewrote := j.Action == ActionRemux || j.Action == ActionEncode
+		if result == "done" && rewrote && j.InSize > 0 && j.OutSize > 0 {
+			w.saved.Add(j.InSize - j.OutSize)
+			w.results.Add(1)
 		}
 	}
 	for _, j := range w.q.Jobs() {
@@ -267,11 +341,14 @@ func (w *Watcher) recordJobs(ctx context.Context) bool {
 			if j.Input != j.Output {
 				mark(j.Input, fileKept, j.Output) // unless it was deleted
 			}
+			record(j, "done")
 		case Failed:
 			mark(j.Input, fileFailed, j.Err.Error())
+			record(j, "failed")
 		case Canceled:
 			if ctx.Err() == nil { // canceled by the user, not by cav1ar stopping
 				mark(j.Input, fileLeft, "canceled")
+				record(j, "canceled")
 			}
 		}
 	}
@@ -287,11 +364,17 @@ func folderPath(s Settings, path string) string {
 	return f.Path
 }
 
+// matchRules goes up whenever what makes a file match its settings changes,
+// such as stripping coming to take chapters too, so that files found to
+// match before are checked again.
+const matchRules = 2
+
 // fingerprint sums up the settings that decide whether a file matches them,
 // so files are checked again when those change. How things are encoded
 // doesn't count: it never makes a finished file not match.
 func fingerprint(s Settings) string {
 	key := struct {
+		Rules                          int
 		MaxHeight                      int
 		AudioCodec                     AudioCodec
 		CopyAudio, Downmix             bool
@@ -301,7 +384,7 @@ func fingerprint(s Settings) string {
 		Title, ReleaseGroup, Name, Out string
 		Watch                          []WatchFolder
 		Preroll                        string
-	}{s.MaxHeight, s.AudioCodec, s.AudioKbps == AudioCopy, s.Downmix, s.Language, s.AudioTracks, s.Subtitles,
+	}{matchRules, s.MaxHeight, s.AudioCodec, s.AudioKbps == AudioCopy, s.Downmix, s.Language, s.AudioTracks, s.Subtitles,
 		s.TidySubs, s.StripMetadata, s.Title, s.ReleaseGroup, s.NameTemplate, s.OutDir, s.Watch, s.Preroll}
 	if s.Preroll != "" {
 		// A new clip at the same path counts as a change. One that can't be
@@ -315,59 +398,21 @@ func fingerprint(s Settings) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// watchState is the state file's contents.
-type watchState struct {
-	Version  int                  `json:"version"`
-	Settings string               `json:"settings"`
-	Folders  []string             `json:"folders"`
-	Files    map[string]fileState `json:"files"`
-}
-
-func (w *Watcher) load() {
-	w.settings, w.folders, w.files = "", map[string]bool{}, map[string]fileState{}
-	data, err := os.ReadFile(w.state)
-	if err != nil {
-		return
-	}
-	var st watchState
-	if json.Unmarshal(data, &st) == nil && st.Version == 2 {
-		w.settings = st.Settings
-		w.folders = setOf(st.Folders)
-		if st.Files != nil {
-			w.files = st.Files
-		}
-		return
-	}
-	// The first version only listed the videos seen in each folder, all of
-	// which were left alone.
-	var seen map[string][]string
-	if json.Unmarshal(data, &seen) == nil {
-		for dir, paths := range seen {
-			w.folders[dir] = true
-			for _, p := range paths {
-				if f, ok := statFile(p); ok {
-					f.Status = fileLeft
-					w.files[p] = f
-				}
-			}
-		}
-	}
-}
-
+// save writes what has changed to the state database.
 func (w *Watcher) save() {
-	st := watchState{Version: 2, Settings: w.settings, Files: w.files}
-	for dir := range w.folders {
-		st.Folders = append(st.Folders, dir)
+	files := make(map[string]*fileState, len(w.dirty))
+	for path := range w.dirty {
+		if f, ok := w.files[path]; ok {
+			files[path] = &f
+		} else {
+			files[path] = nil
+		}
 	}
-	slices.Sort(st.Folders)
-	data, err := json.Marshal(st)
-	if err != nil {
+	if err := w.db.save(w.settings, w.folders, files); err != nil {
+		log.Printf("cav1ar: can't save what's known about the videos: %v", err)
 		return
 	}
-	tmp := w.state + ".tmp"
-	if os.WriteFile(tmp, data, 0o644) == nil {
-		os.Rename(tmp, w.state)
-	}
+	clear(w.dirty)
 }
 
 // removeStaleTemps deletes results left half-written under root by a cav1ar

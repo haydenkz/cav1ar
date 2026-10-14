@@ -47,6 +47,7 @@ type Backend interface {
 	Paused() bool
 	SetHolding(holding bool) // hold back new jobs, letting running ones finish
 	Holding() bool
+	Totals() (saved int64, results int) // over every run, as recorded by the watching cav1ar
 	Jobs() []encode.Job
 	Next() []encode.Event
 	Settings() encode.Settings
@@ -63,8 +64,9 @@ type local struct {
 	w *encode.Watcher
 }
 
-func (l local) Watching() bool { return l.w.Active() }
-func (l local) Daemon() bool   { return false }
+func (l local) Watching() bool       { return l.w.Active() }
+func (l local) Daemon() bool         { return false }
+func (l local) Totals() (int64, int) { return l.w.Totals() }
 
 // clearStatusMsg hides the status line, unless a newer status replaced it.
 type clearStatusMsg struct{ id int }
