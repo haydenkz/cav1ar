@@ -315,6 +315,9 @@ func addPreroll(ctx context.Context, s Settings, main string, mainInfo mediaInfo
 	if err != nil {
 		return 0, err
 	}
+	if err := seamFits(ctx, pre, main, length); err != nil {
+		return 0, err
+	}
 	id, _ := prerollID(s.Preroll)
 
 	list, err := os.CreateTemp("", "cav1ar-concat-*.txt")
@@ -416,8 +419,70 @@ func checkJoin(ctx context.Context, joined string, main mediaInfo, length time.D
 	from := max(0, length-time.Second)
 	b, err := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-nostdin", "-ss", seconds6(from), "-t", "3",
 		"-i", joined, "-map", "0:v:0", "-f", "null", "-").CombinedOutput()
-	if err != nil || len(bytes.TrimSpace(b)) > 0 {
-		return fmt.Errorf("its video doesn't decode cleanly where the preroll meets it: %s", lastLine(string(b), err))
+	// Some sources give frames in pairs with the same timestamp, which
+	// players take in their stride but the null muxer complains about.
+	// They'd complain without a preroll too, so they're not counted, and
+	// timestamps across the join are checked separately below.
+	var complaints []string
+	for line := range strings.Lines(string(b)) {
+		if line = strings.TrimSpace(line); line != "" && !strings.Contains(line, "non monotonically increasing dts") {
+			complaints = append(complaints, line)
+		}
+	}
+	if err != nil || len(complaints) > 0 {
+		return fmt.Errorf("its video doesn't decode cleanly where the preroll meets it: %s",
+			lastLine(strings.Join(complaints, "\n"), err))
+	}
+	return nil
+}
+
+// seamFits checks that the preroll's video ends by length, where main's is
+// put after it, and that main's starts no earlier than its own zero, so the
+// two can't overlap. Once joined, an overlap is hard to see: the muxer turns
+// timestamps that go back into a run of equal ones.
+func seamFits(ctx context.Context, pre, main string, length time.Duration) error {
+	packets := func(path string, intervals ...string) ([]string, error) {
+		args := append([]string{"-v", "error", "-select_streams", "v:0"}, intervals...)
+		out, err := exec.CommandContext(ctx, "ffprobe", append(args,
+			"-show_entries", "packet=dts_time,pts_time,duration_time", "-of", "csv=p=0", path)...).Output()
+		if err != nil {
+			return nil, err
+		}
+		var lines []string
+		for line := range strings.Lines(string(out)) {
+			if line = strings.TrimSpace(line); line != "" {
+				lines = append(lines, line)
+			}
+		}
+		return lines, nil
+	}
+	const slack = time.Millisecond // timestamps are in whole milliseconds
+	preEnd := time.Duration(0)
+	lines, err := packets(pre)
+	if err != nil {
+		return fmt.Errorf("reading the preroll's timestamps: %w", err)
+	}
+	for _, line := range lines {
+		f := strings.Split(line, ",")
+		if len(f) >= 3 {
+			preEnd = max(preEnd, seconds(f[0])+seconds(f[2]))
+		}
+	}
+	if preEnd > length+slack {
+		return fmt.Errorf("the preroll runs to %s, past %s where the video is put", seconds6(preEnd), seconds6(length))
+	}
+	if lines, err = packets(main, "-read_intervals", "%+#1"); err != nil {
+		return fmt.Errorf("reading the video's timestamps: %w", err)
+	}
+	// ffprobe gives pts, dts and duration, in that order.
+	if len(lines) > 0 {
+		f := strings.Split(lines[0], ",")
+		if len(f) < 2 {
+			return nil
+		}
+		if dts, err := strconv.ParseFloat(f[1], 64); err == nil && time.Duration(dts*float64(time.Second)) < -slack {
+			return fmt.Errorf("the video starts at %ss, so it would overlap the end of the preroll", f[1])
+		}
 	}
 	return nil
 }
