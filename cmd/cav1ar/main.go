@@ -93,7 +93,7 @@ func main() {
 	}
 	go encode.CheckEncoder(settings.Encoder) // test the encoders now, so it's done by the time it matters
 
-	watchState, err := config.WatchStatePath()
+	statePath, err := config.StatePath()
 	if err != nil {
 		fail(1, "%v", err)
 	}
@@ -119,7 +119,7 @@ func main() {
 		}
 	}
 	q := encode.NewQueue(ctx, settings)
-	w := encode.Watch(ctx, q, watchState, *retryFailed)
+	w := encode.Watch(ctx, q, statePath, *retryFailed)
 	for _, arg := range flag.Args() {
 		if err := add(q, arg); err != nil {
 			fail(1, "%v", err)

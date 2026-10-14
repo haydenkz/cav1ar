@@ -15,8 +15,9 @@ import (
 // Path is where settings are stored, e.g. ~/.config/cav1ar/config.json.
 func Path() (string, error) { return file("config.json") }
 
-// WatchStatePath is where the folder watcher remembers the videos it has seen.
-func WatchStatePath() (string, error) { return file("watch.json") }
+// StatePath is where the folder watcher keeps what it knows between runs:
+// the videos it has seen, and the jobs that have finished.
+func StatePath() (string, error) { return file("cav1ar.db") }
 
 func file(name string) (string, error) {
 	dir, err := os.UserConfigDir()
