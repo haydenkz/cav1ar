@@ -134,6 +134,11 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 		}
 		tmp = filepath.Join(dir, filepath.Base(tmp))
 	}
+	release, err := holdTemp(tmp)
+	if err != nil {
+		return err
+	}
+	defer release()
 	defer os.Remove(tmp) // gone already, once the result is in place
 	hwDecode := []bool{false}
 	if action == ActionEncode && s.Encoder == EncoderNVIDIA {
@@ -170,6 +175,11 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 	}
 	if s.Preroll != "" {
 		joined := tempPath(out)
+		release, err := holdTemp(joined)
+		if err != nil {
+			return err
+		}
+		defer release()
 		defer os.Remove(joined)
 		length, err := addPreroll(ctx, s, tmp, mainInfo, joined, u)
 		if ctx.Err() != nil {
