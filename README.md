@@ -86,7 +86,9 @@ Settings → Output → **Preroll** (or `-preroll`) takes a clip to play before
 every result, such as an intro. There's none unless you set one. The clip is
 encoded once for each kind of video it meets, matching it down to the AV1
 settings, then joined on without re-encoding the video, so players see one
-continuous stream. The file it's joined onto is kept in
+continuous stream. Matching is best effort: when the encoder can't reproduce
+the video's AV1 sequence header, the log says so, since some players may
+stutter where the two meet. The file it's joined onto is kept in
 `~/.cache/cav1ar/work`, so the library's disks only read the source and write
 the result.
 
