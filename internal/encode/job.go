@@ -78,6 +78,12 @@ func (j Job) ETA() time.Duration {
 	if j.State != Running || j.Progress <= 0 || j.Progress >= 1 {
 		return 0
 	}
+	if j.Speed > 0 && j.Duration > 0 {
+		// Going by the encoder's speed counts only the pass it's on, where
+		// time elapsed would count looking the file over first, and any
+		// earlier pass, as if they were part of this one.
+		return time.Duration(float64(j.Duration) * (1 - j.Progress) / j.Speed)
+	}
 	e := j.Elapsed()
 	return time.Duration(float64(e) * (1 - j.Progress) / j.Progress)
 }
