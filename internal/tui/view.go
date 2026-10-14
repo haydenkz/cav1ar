@@ -278,6 +278,9 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 	case encode.Queued:
 		icon = m.st.dim.Render("○")
 		bar = m.st.dim.Render(cell("queued", c.bar))
+		if j.Next {
+			icon, bar = m.st.selected.Render("○"), m.st.selected.Render(cell("up next", c.bar))
+		}
 		if j.InSize > 0 {
 			info = m.st.dim.Render(cell(fmtSize(j.InSize), c.info))
 		}

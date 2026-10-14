@@ -33,6 +33,11 @@ const (
 	fileTodo   = "todo"   // queued; queued again on the next run without being read, unless it changes
 )
 
+// noteArrived marks a todo video that arrived since the watcher last looked,
+// rather than being part of the library already there, so it goes ahead of
+// the rest, including on later runs.
+const noteArrived = "arrived"
+
 // Watcher keeps the videos under a Queue's Settings.Watch folders, including
 // in subfolders, matching the settings: it queues the ones that don't, as
 // they arrive. Only one cav1ar watches at a time: the others wait and take
@@ -54,6 +59,11 @@ type Watcher struct {
 	waiting  map[string]fileState // new or changed videos, as they looked on the last scan
 	recorded map[int]time.Time    // jobs whose outcome is in files, and when they finished
 	requeued map[string]bool      // videos found to need work on an earlier run, queued again on this one
+
+	// Videos changed after this arrived since the watcher last looked, and
+	// go ahead of the rest: the end of the last run's last scan, or the
+	// start of this run if there wasn't one.
+	arrivedAfter time.Time
 
 	saved, results atomic.Int64 // totals of every finished job that rewrote a file; see stateDB.totals
 }
@@ -160,6 +170,9 @@ func (w *Watcher) acquire() bool {
 	w.active.Store(true)
 	w.settings, w.folders, w.files = st.settings, st.folders, st.files
 	w.dirty, w.requeued = map[string]bool{}, map[string]bool{}
+	if w.arrivedAfter = st.scanned; w.arrivedAfter.IsZero() {
+		w.arrivedAfter = time.Now()
+	}
 	if saved, results, err := db.totals(); err == nil {
 		w.saved.Store(saved)
 		w.results.Store(int64(results))
@@ -240,8 +253,7 @@ func (w *Watcher) scan(ctx context.Context) {
 				if known.Status == fileTodo && !w.requeued[v] {
 					// Found to need work on an earlier run, and unchanged
 					// since, so there's no need to read it again.
-					w.q.Add(v)
-					w.requeued[v] = true
+					w.queue(v, known.Note == noteArrived)
 				}
 				continue
 			}
@@ -258,9 +270,11 @@ func (w *Watcher) scan(ctx context.Context) {
 			delete(w.waiting, v)
 			now.Status = fileOK
 			if needsWork(ctx, v, s) {
-				w.q.Add(v)
 				now.Status = fileTodo
-				w.requeued[v] = true
+				if changedAt(v).After(w.arrivedAfter) {
+					now.Note = noteArrived
+				}
+				w.queue(v, now.Note == noteArrived)
 			}
 			w.setFile(v, now)
 			changed = true
@@ -295,6 +309,28 @@ func (w *Watcher) scan(ctx context.Context) {
 	if changed || checked > 0 {
 		w.save()
 	}
+}
+
+// queue queues v, ahead of the rest if it has just arrived: its job is likely
+// to be watched sooner than the backlog's.
+func (w *Watcher) queue(v string, arrived bool) {
+	if arrived {
+		w.q.AddNext(v)
+	} else {
+		w.q.Add(v)
+	}
+	w.requeued[v] = true
+}
+
+// changedAt is when path was last changed as a file, rather than as content:
+// when it was created, or moved or renamed into place. Unlike its
+// modification time, unpacking it from an archive can't set that back.
+func changedAt(path string) time.Time {
+	var st syscall.Stat_t
+	if syscall.Stat(path, &st) != nil {
+		return time.Time{}
+	}
+	return time.Unix(st.Ctim.Unix())
 }
 
 // needsWork reports whether a job would do anything to path. When it can't
