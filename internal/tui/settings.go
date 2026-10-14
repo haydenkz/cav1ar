@@ -252,7 +252,7 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 	metadata := huh.NewGroup(
 		huh.NewSelect[bool]().Key("strip").
 			Title("Original metadata").
-			Description("Stripping removes old titles and tags. Track languages stay.").
+			Description("Stripping removes old titles, tags and chapters. Track languages stay.").
 			Options(
 				option("keep", false, rec.StripMetadata),
 				option("strip", true, rec.StripMetadata),

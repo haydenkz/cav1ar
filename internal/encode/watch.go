@@ -287,11 +287,17 @@ func folderPath(s Settings, path string) string {
 	return f.Path
 }
 
+// matchRules goes up whenever what makes a file match its settings changes,
+// such as stripping coming to take chapters too, so that files found to
+// match before are checked again.
+const matchRules = 2
+
 // fingerprint sums up the settings that decide whether a file matches them,
 // so files are checked again when those change. How things are encoded
 // doesn't count: it never makes a finished file not match.
 func fingerprint(s Settings) string {
 	key := struct {
+		Rules                          int
 		MaxHeight                      int
 		AudioCodec                     AudioCodec
 		CopyAudio, Downmix             bool
@@ -301,7 +307,7 @@ func fingerprint(s Settings) string {
 		Title, ReleaseGroup, Name, Out string
 		Watch                          []WatchFolder
 		Preroll                        string
-	}{s.MaxHeight, s.AudioCodec, s.AudioKbps == AudioCopy, s.Downmix, s.Language, s.AudioTracks, s.Subtitles,
+	}{matchRules, s.MaxHeight, s.AudioCodec, s.AudioKbps == AudioCopy, s.Downmix, s.Language, s.AudioTracks, s.Subtitles,
 		s.TidySubs, s.StripMetadata, s.Title, s.ReleaseGroup, s.NameTemplate, s.OutDir, s.Watch, s.Preroll}
 	if s.Preroll != "" {
 		// A new clip at the same path counts as a change. One that can't be

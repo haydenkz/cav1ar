@@ -17,6 +17,7 @@ type mediaInfo struct {
 	Duration time.Duration // 0 if unknown
 	Streams  []streamInfo
 	Tags     map[string]string // container tags, keys in upper case
+	Chapters int               // how many chapters it has
 }
 
 type streamInfo struct {
@@ -64,7 +65,7 @@ func probe(ctx context.Context, in string) (mediaInfo, error) {
 		"-show_entries", "format=duration:format_tags"+
 			":stream=index,codec_type,codec_name,channels,sample_rate,width,height,pix_fmt,level,bit_rate,duration"+
 			",r_frame_rate,avg_frame_rate,field_order,color_primaries,color_transfer,color_space,color_range"+
-			":stream_tags:stream_disposition",
+			":stream_tags:stream_disposition:chapter=id",
 		"-of", "json",
 		in,
 	).Output()
@@ -108,12 +109,13 @@ func probe(ctx context.Context, in string) (mediaInfo, error) {
 			Tags           map[string]string `json:"tags"`
 			Disposition    map[string]int    `json:"disposition"`
 		} `json:"streams"`
+		Chapters []struct{} `json:"chapters"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return mediaInfo{}, fmt.Errorf("reading ffprobe output: %w", err)
 	}
 
-	info := mediaInfo{Duration: seconds(raw.Format.Duration), Tags: map[string]string{}}
+	info := mediaInfo{Duration: seconds(raw.Format.Duration), Tags: map[string]string{}, Chapters: len(raw.Chapters)}
 	for k, v := range raw.Format.Tags {
 		info.Tags[strings.ToUpper(k)] = v
 	}

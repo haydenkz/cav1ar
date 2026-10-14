@@ -406,6 +406,9 @@ func (p *plan) reasons() []string {
 	if p.tagsDiffer() {
 		add("tags")
 	}
+	if s.StripMetadata && p.info.Chapters > 0 {
+		add("chapters")
+	}
 	return out
 }
 
@@ -541,7 +544,7 @@ func (p *plan) args(out string, hwDecode bool) []string {
 	}
 
 	if s.StripMetadata {
-		args = append(args, "-map_metadata", "-1")
+		args = append(args, "-map_metadata", "-1", "-map_chapters", "-1")
 		// Put back what players need: track languages and attachment details.
 		if p.video.Language != "" {
 			args = append(args, "-metadata:s:v:0", "language="+p.video.Language)
