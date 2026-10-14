@@ -80,6 +80,20 @@ place once every track is checked to run its full length. With *delete
 originals* on, a file whose name doesn't change is replaced in place.
 `-retry-failed` gives files that failed another go.
 
+## Prerolls
+
+Settings → Output → **Preroll** (or `-preroll`) takes a clip to play before
+every result, such as an intro. There's none unless you set one. The clip is
+encoded once for each kind of video it meets, matching it down to the AV1
+settings, then joined on without re-encoding the video, so players see one
+continuous stream. The file it's joined onto is kept in
+`~/.cache/cav1ar/work`, so the library's disks only read the source and write
+the result.
+
+Each result records which clip it starts with and how long it runs, so a
+preroll is never added twice. Changing the clip swaps it in every file that
+has one, and clearing it takes it back out, rewriting each of those files.
+
 ## Background service
 
 `./install.sh --service` sets up a systemd user service that runs
