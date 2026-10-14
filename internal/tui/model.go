@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"cmp"
 	"slices"
 	"strings"
 	"time"
@@ -299,8 +300,8 @@ func (m *Model) apply(evs []encode.Event) {
 func (m *Model) placeCursor() {
 	m.placed = true
 	last := -1
-	for i, j := range m.jobs {
-		switch {
+	for _, i := range m.order() {
+		switch j := m.jobs[i]; {
 		case j.State == encode.Running:
 			m.selectJob(i)
 			return
@@ -344,16 +345,43 @@ func (m *Model) setPauseHelp() {
 	}
 }
 
-// rows lists the jobs the list shows, by index: all of them, or when
-// finished ones are hidden, those still to do and those that failed.
+// rows lists the jobs the list shows, by index, in the order they run: all
+// of them, or when finished ones are hidden, those still to do and those that
+// failed.
 func (m Model) rows() []int {
-	rows := make([]int, 0, len(m.jobs))
-	for i, j := range m.jobs {
-		if !m.hideDone || j.State != encode.Done && j.State != encode.Canceled {
-			rows = append(rows, i)
-		}
+	return slices.DeleteFunc(m.order(), func(i int) bool { return !m.shows(m.jobs[i]) })
+}
+
+// shows reports whether the list shows j.
+func (m Model) shows(j encode.Job) bool {
+	return !m.hideDone || j.State != encode.Done && j.State != encode.Canceled
+}
+
+// order lists every job by index in the order they run, rather than the
+// order they were added, since up next jobs jump the line: those that have
+// started, by when they started, then those up next, then the rest.
+func (m Model) order() []int {
+	order := make([]int, len(m.jobs))
+	for i := range order {
+		order[i] = i
 	}
-	return rows
+	slices.SortStableFunc(order, func(a, b int) int {
+		ja, jb := m.jobs[a], m.jobs[b]
+		return cmp.Or(cmp.Compare(place(ja), place(jb)), ja.Started.Compare(jb.Started))
+	})
+	return order
+}
+
+// place is which part of the line j is in: 0 once it has started, 1 while
+// it waits up next, and 2 while it waits behind those.
+func place(j encode.Job) int {
+	switch {
+	case !j.Started.IsZero():
+		return 0
+	case j.Next:
+		return 1
+	}
+	return 2
 }
 
 // moveCursor selects the job n rows below the selected one, or above it
@@ -363,7 +391,7 @@ func (m *Model) moveCursor(n int) {
 	if len(rows) == 0 {
 		return
 	}
-	at, _ := slices.BinarySearch(rows, m.cursor)
+	at := slices.Index(rows, m.cursor)
 	m.selectJob(rows[min(max(at+n, 0), len(rows)-1)])
 }
 
@@ -393,10 +421,18 @@ func (m *Model) layout() {
 	m.bar.SetWidth(columnsFor(m.width - 4).bar)
 	m.picker.SetHeight(max(avail-2, 1))
 
-	// A hidden job can't stay selected, so select the next one shown.
-	at, found := slices.BinarySearch(shown, m.cursor)
-	if !found && len(shown) > 0 {
-		at = min(at, len(shown)-1)
+	// A hidden job can't stay selected, so select the next one shown, or the
+	// last when none follows it.
+	at := slices.Index(shown, m.cursor)
+	if at < 0 && len(shown) > 0 {
+		at = len(shown) - 1
+		all := m.order()
+		for _, i := range all[slices.Index(all, m.cursor)+1:] {
+			if m.shows(m.jobs[i]) {
+				at = slices.Index(shown, i)
+				break
+			}
+		}
 		m.selectJob(shown[at])
 	}
 	rows := m.jobsH - 2
