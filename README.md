@@ -83,6 +83,11 @@ marked *up next*, so new downloads don't wait behind a long backlog. The job
 list is in the order jobs run: those that have started, then those up next,
 then the rest.
 
+Each job reads the original once, encoding the video and audio to one file
+and copying the subtitles and attachments to another on local disk, then
+puts them together in a quick remux. If the audio comes out short, which
+ffmpeg can do without saying so, it is encoded again on its own.
+
 Results are written to a hidden file next to the original, and only take its
 place once every track is checked to run its full length. With *delete
 originals* on, a file whose name doesn't change is replaced in place.

@@ -94,7 +94,7 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 	for _, n := range p.notes {
 		u.log("cav1ar: " + n)
 	}
-	action, out, info := p.action(), p.out, p.info
+	action, out := p.action(), p.out
 	u.planned(action, out)
 
 	switch action {
@@ -123,16 +123,16 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 		}
 	}
 
+	// The passes' files are only intermediates, so keep them off the
+	// library's storage, which then only reads the source and writes the
+	// result.
+	work, err := workDir()
+	if err != nil {
+		return err
+	}
 	tmp := tempPath(out)
-	if s.Preroll != "" {
-		// This is only an intermediate the preroll is joined onto, so keep it
-		// off the library's storage, which then only reads the source and
-		// writes the result.
-		dir, err := workDir()
-		if err != nil {
-			return err
-		}
-		tmp = filepath.Join(dir, filepath.Base(tmp))
+	if s.Preroll != "" { // the result is an intermediate too, which the preroll is joined onto
+		tmp = filepath.Join(work, filepath.Base(tmp))
 	}
 	release, err := holdTemp(tmp)
 	if err != nil {
@@ -140,38 +140,12 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 	}
 	defer release()
 	defer os.Remove(tmp) // gone already, once the result is in place
-	hwDecode := []bool{false}
-	if action == ActionEncode && s.Encoder == EncoderNVIDIA {
-		hwDecode = []bool{true, false}
-	}
-	var mainInfo mediaInfo
-	for {
-		for i, hw := range hwDecode {
-			args := p.args(tmp, hw)
-			u.log("cav1ar: ffmpeg " + strings.Join(args, " "))
-			err = runFFmpeg(ctx, args, info.Duration, u)
-			if err == nil || ctx.Err() != nil || i == len(hwDecode)-1 {
-				break
-			}
-			u.log("cav1ar: decoding on the GPU failed (" + err.Error() + "), so trying again on the CPU")
-		}
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err != nil {
-			return err
-		}
-		if mainInfo, err = verify(ctx, tmp, p); err == nil || p.subsApart || len(p.subs) == 0 {
-			break
-		}
-		// ffmpeg can stop feeding the other tracks, without saying so, once
-		// a sparse subtitle track has had its say: one with a single forced
-		// line, say. Reading the subtitles separately gets around that.
-		u.log("cav1ar: the result failed its checks (" + err.Error() + "), so trying again with the subtitles read separately")
-		p.subsApart = true
+	mainInfo, err := encodeAndRemux(ctx, p, action, tmp, work, u)
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
 	if err != nil {
-		return fmt.Errorf("the result failed its checks, so the original was kept: %w", err)
+		return err
 	}
 	if s.Preroll != "" {
 		joined := tempPath(out)
@@ -213,6 +187,89 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 		}
 	}
 	return nil
+}
+
+// encodeAndRemux writes the result to tmp: an encoding pass writes the video
+// and audio, and the subtitles and attachments, to files of their own in
+// work, and a remuxing pass puts them together; see plan.encodeArgs. It
+// returns what the result holds, once it checks out.
+func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work string, u updates) (mediaInfo, error) {
+	// intermediate picks a file for a pass to write, held so no cav1ar takes
+	// it for one left behind, and removed when done is called.
+	intermediate := func() (path string, done func(), err error) {
+		path = tempPath(filepath.Join(work, "intermediate"))
+		release, err := holdTemp(path)
+		if err != nil {
+			return "", nil, err
+		}
+		return path, func() { release(); os.Remove(path) }, nil
+	}
+	run := func(args []string) error {
+		u.log("cav1ar: ffmpeg " + strings.Join(args, " "))
+		return runFFmpeg(ctx, args, p.info.Duration, u)
+	}
+
+	av, done, err := intermediate()
+	if err != nil {
+		return mediaInfo{}, err
+	}
+	defer done()
+	var side string
+	if p.hasSide() {
+		if side, done, err = intermediate(); err != nil {
+			return mediaInfo{}, err
+		}
+		defer done()
+	}
+	hwDecode := []bool{false}
+	if action == ActionEncode && p.settings.Encoder == EncoderNVIDIA {
+		hwDecode = []bool{true, false}
+	}
+	for i, hw := range hwDecode {
+		err = run(p.encodeArgs(av, side, hw))
+		if err == nil || ctx.Err() != nil || i == len(hwDecode)-1 {
+			break
+		}
+		u.log("cav1ar: decoding on the GPU failed (" + err.Error() + "), so trying again on the CPU")
+	}
+	if err != nil {
+		return mediaInfo{}, err
+	}
+
+	// The audio can still stop early, in which case encode it again on its
+	// own. Video that stops early can't be helped that way, so leave it for
+	// the result's checks to turn down.
+	var audio string
+	if len(p.audio) > 0 {
+		info, err := probe(ctx, av)
+		if err != nil {
+			return mediaInfo{}, fmt.Errorf("the encoding pass's file couldn't be read: %w", err)
+		}
+		var short *shortStream
+		if err := checkStreamLengths(info, p); errors.As(err, &short) && short.kind == "audio" {
+			u.log("cav1ar: the encoding pass's " + strings.TrimPrefix(short.Error(), "its ") +
+				", so encoding the audio again on its own")
+			if audio, done, err = intermediate(); err != nil {
+				return mediaInfo{}, err
+			}
+			defer done()
+			u.step("encoding the audio again")
+			if err := run(p.audioArgs(audio)); err != nil {
+				return mediaInfo{}, err
+			}
+		}
+	}
+
+	u.step("remuxing")
+	if err := run(p.remuxArgs(tmp, av, audio, side)); err != nil {
+		return mediaInfo{}, err
+	}
+	u.step("")
+	info, err := verify(ctx, tmp, p)
+	if err != nil {
+		return info, fmt.Errorf("the result failed its checks, so the original was kept: %w", err)
+	}
+	return info, nil
 }
 
 // runFFmpeg runs ffmpeg, reporting its progress and output as it goes.
@@ -347,11 +404,21 @@ func checkStreamLengths(out mediaInfo, p *plan) error {
 			want, slack = src.Duration, tolerance(src.Duration)
 		}
 		if want-st.Duration > slack {
-			return fmt.Errorf("its %s stops at %s, but should run to %s",
-				st.Type, st.Duration.Round(time.Second), want.Round(time.Second))
+			return &shortStream{kind: st.Type, at: st.Duration, want: want}
 		}
 	}
 	return nil
+}
+
+// shortStream is a video or audio stream that stops before it should.
+type shortStream struct {
+	kind     string // video or audio
+	at, want time.Duration
+}
+
+func (e *shortStream) Error() string {
+	return fmt.Sprintf("its %s stops at %s, but should run to %s",
+		e.kind, e.at.Round(time.Second), e.want.Round(time.Second))
 }
 
 // renameNoReplace moves from to to, unless something is already at to.

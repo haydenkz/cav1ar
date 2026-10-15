@@ -94,7 +94,6 @@ type plan struct {
 	out       string   // where the result goes
 	notes     []string // choices worth showing the user, such as tracks left out
 	checkSubs bool     // subtitles need tidying before the plan is final
-	subsApart bool     // read the subtitles through a second opening of the source; see encodeFile
 
 	prerollHave string        // ID of the preroll the source starts with, if any
 	prerollIn   time.Duration // how long that preroll runs, which the job cuts off
@@ -457,44 +456,29 @@ func (p *plan) action() Action {
 	return ActionRename
 }
 
-// args is the ffmpeg command line that carries out the plan, writing to out.
-// hwDecode decodes the video on the GPU, when the encoder can use that.
-func (p *plan) args(out string, hwDecode bool) []string {
-	s := p.settings
-	args := []string{"-hide_banner", "-nostdin", "-nostats", "-y",
+// Encodes take two passes. ffmpeg has exited cleanly on encodes whose audio
+// stopped an hour early: with the video, audio and subtitles in one pass, it
+// can end an audio track partway through without saying so. So the encoding
+// pass reads the source once and writes the video and audio to one file and
+// the subtitles and attachments to another, and the remuxing pass puts them
+// together with the flags and tags the settings want. If the encoding pass
+// still cuts the audio short, a pass of its own encodes the audio again.
+
+// inputArgs opens the source for a pass that reads it, cutting off any
+// preroll it starts with. beforeInput are the video decoder's options.
+func (p *plan) inputArgs(beforeInput []string) []string {
+	args := []string{"-hide_banner", "-nostdin", "-nostats", "-y", "-progress", "pipe:1",
 		"-analyzeduration", "100M", "-probesize", "100M"}
-	var video []string
-	if p.encodeVideo {
-		var beforeInput []string
-		beforeInput, video = videoArgs(s, p.video, p.width, p.height, hwDecode)
-		args = append(args, beforeInput...)
-	} else {
-		video = []string{"-c:v", "copy"}
-	}
+	args = append(args, beforeInput...)
 	if p.prerollIn > 0 { // cut off the preroll, which is added back afterwards if wanted
 		args = append(args, "-ss", seconds6(p.prerollIn))
 	}
-	args = append(args, "-i", p.in)
-	subsFrom := "0:"
-	if p.subsApart && len(p.subs) > 0 {
-		if p.prerollIn > 0 {
-			args = append(args, "-ss", seconds6(p.prerollIn))
-		}
-		args = append(args, "-i", p.in)
-		subsFrom = "1:"
-	}
-	args = append(args, "-map", "0:"+strconv.Itoa(p.video.Index))
-	for _, a := range p.audio {
-		args = append(args, "-map", "0:"+strconv.Itoa(a.Index))
-	}
-	for _, sub := range p.subs {
-		args = append(args, "-map", subsFrom+strconv.Itoa(sub.Index))
-	}
-	for _, f := range p.fonts {
-		args = append(args, "-map", "0:"+strconv.Itoa(f.Index))
-	}
-	args = append(args, video...)
+	return append(args, "-i", p.in)
+}
 
+// audioCodecArgs encodes or copies each audio track the plan keeps.
+func (p *plan) audioCodecArgs() []string {
+	var args []string
 	for i, a := range p.audio {
 		if a.copy {
 			args = append(args, fmt.Sprintf("-c:a:%d", i), "copy")
@@ -507,7 +491,7 @@ func (p *plan) args(out string, hwDecode bool) []string {
 		// The encoders reject some common layouts, such as 5.1(side), so
 		// remap them to the nearest one they accept.
 		layouts := "7.1|5.1|stereo|mono"
-		if s.Downmix && a.Channels > 2 {
+		if p.settings.Downmix && a.Channels > 2 {
 			layouts = "stereo"
 		}
 		args = append(args,
@@ -515,10 +499,93 @@ func (p *plan) args(out string, hwDecode bool) []string {
 			fmt.Sprintf("-b:a:%d", i), fmt.Sprintf("%dk", a.kbps),
 			fmt.Sprintf("-filter:a:%d", i), "aformat=channel_layouts="+layouts)
 	}
+	return args
+}
+
+// hasSide reports whether the plan keeps subtitles or attachments, which the
+// encoding pass writes to a file of their own.
+func (p *plan) hasSide() bool { return len(p.subs) > 0 || len(p.fonts) > 0 }
+
+// encodeArgs is the ffmpeg command line for the encoding pass, which writes
+// the video and audio to av, and the subtitles and attachments to side when
+// the plan keeps any. hwDecode decodes the video on the GPU, when the encoder
+// can use that.
+func (p *plan) encodeArgs(av, side string, hwDecode bool) []string {
+	var beforeInput, video []string
+	if p.encodeVideo {
+		beforeInput, video = videoArgs(p.settings, p.video, p.width, p.height, hwDecode)
+	} else {
+		video = []string{"-c:v", "copy"}
+	}
+	args := append(p.inputArgs(beforeInput), "-map", "0:"+strconv.Itoa(p.video.Index))
+	for _, a := range p.audio {
+		args = append(args, "-map", "0:"+strconv.Itoa(a.Index))
+	}
+	args = append(args, video...)
+	args = append(args, p.audioCodecArgs()...)
+	args = append(args, "-max_muxing_queue_size", "4096", "-f", "matroska", av)
+	if !p.hasSide() {
+		return args
+	}
+	for _, sub := range p.subs {
+		args = append(args, "-map", "0:"+strconv.Itoa(sub.Index))
+	}
+	for _, f := range p.fonts {
+		args = append(args, "-map", "0:"+strconv.Itoa(f.Index))
+	}
+	for i, sub := range p.subs {
+		args = append(args, fmt.Sprintf("-c:s:%d", i), sub.codec)
+	}
+	if len(p.fonts) > 0 {
+		args = append(args, "-c:t", "copy")
+	}
+	return append(args, "-map_chapters", "-1", "-max_muxing_queue_size", "4096", "-f", "matroska", side)
+}
+
+// audioArgs is the ffmpeg command line for a pass that encodes only the
+// audio, to out.
+func (p *plan) audioArgs(out string) []string {
+	args := p.inputArgs(nil)
+	for _, a := range p.audio {
+		args = append(args, "-map", "0:"+strconv.Itoa(a.Index))
+	}
+	args = append(args, p.audioCodecArgs()...)
+	return append(args, "-map_chapters", "-1", "-max_muxing_queue_size", "4096", "-f", "matroska", out)
+}
+
+// remuxArgs is the ffmpeg command line for the remuxing pass, which copies
+// the tracks from the encoding pass's files into out and gives them the
+// flags and tags the settings want. audio, when not empty, is the audio-only
+// pass's file, whose audio replaces av's. The video and audio files carry
+// the source's tags and chapters, so those come from av.
+func (p *plan) remuxArgs(out, av, audio, side string) []string {
+	s := p.settings
+	args := []string{"-hide_banner", "-nostdin", "-nostats", "-y", "-progress", "pipe:1", "-i", av}
+	audioFrom, sideFrom, inputs := "0:", "", 1
+	if audio != "" {
+		args = append(args, "-i", audio)
+		audioFrom = strconv.Itoa(inputs) + ":"
+		inputs++
+	}
+	if side != "" {
+		args = append(args, "-i", side)
+		sideFrom = strconv.Itoa(inputs) + ":"
+	}
+	args = append(args, "-map", "0:v:0")
+	for i := range p.audio {
+		args = append(args, "-map", audioFrom+"a:"+strconv.Itoa(i))
+	}
+	for i := range p.subs {
+		args = append(args, "-map", sideFrom+"s:"+strconv.Itoa(i))
+	}
+	for i := range p.fonts {
+		args = append(args, "-map", sideFrom+"t:"+strconv.Itoa(i))
+	}
+	args = append(args, "-c", "copy")
+
 	if len(p.audio) > 0 && (s.AudioTracks == KeepLanguage || s.AudioTracks == KeepBest) {
 		args = append(args, "-disposition:a:0", "default")
 	}
-
 	for i, sub := range p.subs {
 		var flags []string
 		if sub.Default {
@@ -534,13 +601,10 @@ func (p *plan) args(out string, hwDecode bool) []string {
 		if disposition == "" {
 			disposition = "0"
 		}
-		args = append(args, fmt.Sprintf("-c:s:%d", i), sub.codec, fmt.Sprintf("-disposition:s:%d", i), disposition)
+		args = append(args, fmt.Sprintf("-disposition:s:%d", i), disposition)
 		if label := sub.label(); label != "" && (s.StripMetadata || sub.Title == "") {
 			args = append(args, fmt.Sprintf("-metadata:s:s:%d", i), "title="+label)
 		}
-	}
-	if len(p.fonts) > 0 {
-		args = append(args, "-c:t", "copy")
 	}
 
 	if s.StripMetadata {
@@ -574,8 +638,7 @@ func (p *plan) args(out string, hwDecode bool) []string {
 	if p.prerollIn > 0 && !s.StripMetadata {
 		args = append(args, "-metadata", prerollTag+"=")
 	}
-
-	return append(args, "-max_muxing_queue_size", "4096", "-f", "matroska", "-progress", "pipe:1", out)
+	return append(args, "-max_muxing_queue_size", "4096", "-f", "matroska", out)
 }
 
 // inLanguage returns the streams tagged with lang.
