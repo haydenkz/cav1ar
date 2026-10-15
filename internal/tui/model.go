@@ -290,7 +290,7 @@ func (m *Model) apply(evs []encode.Event) {
 			m.jobs[id] = ev.Job
 		}
 		if ev.Line != "" {
-			m.appendLog(id, strings.ReplaceAll(ev.Line, "\t", "    "))
+			m.appendLog(id, m.logLine(ev.Line))
 		}
 	}
 }
@@ -310,6 +310,22 @@ func (m *Model) placeCursor() {
 		}
 	}
 	m.selectJob(last)
+}
+
+// logLine styles a line of a job's log so that cav1ar's own lines stand out
+// from ffmpeg's output, and the start of each stage most of all.
+func (m *Model) logLine(line string) string {
+	line = strings.ReplaceAll(line, "\t", "    ")
+	if stage, ok := encode.Stage(line); ok {
+		return m.st.paneTitle.Render("▸ " + stage)
+	}
+	if msg, ok := encode.Own(line); ok {
+		if cmd, ok := strings.CutPrefix(msg, "ffmpeg "); ok {
+			return m.st.dim.Render("$ ffmpeg " + cmd)
+		}
+		return msg
+	}
+	return m.st.dim.Render(line)
 }
 
 func (m *Model) appendLog(id int, line string) {

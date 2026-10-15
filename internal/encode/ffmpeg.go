@@ -87,6 +87,7 @@ func prepare(ctx context.Context, in string, s Settings, log func(string)) (*pla
 // encodeFile brings in into line with s: encoding, remuxing or renaming it,
 // or leaving it be if it already matches.
 func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
+	u.stage("checking the file")
 	p, err := prepare(ctx, in, s, u.log)
 	if err != nil {
 		return err
@@ -162,6 +163,7 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 		if err != nil {
 			return fmt.Errorf("adding the preroll: %w", err)
 		}
+		u.stage("checking the result with the preroll")
 		if err := checkJoin(ctx, joined, mainInfo, length); err != nil {
 			return fmt.Errorf("the result with the preroll failed its checks, so the original was kept: %w", err)
 		}
@@ -169,12 +171,14 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 		tmp = joined
 	}
 	if out == in {
+		u.stage("replacing the original")
 		if err := os.Rename(tmp, out); err != nil {
 			return err
 		}
 		u.log("cav1ar: replaced the original with the result")
 		return nil
 	}
+	u.stage("moving the result into place")
 	if err := renameNoReplace(tmp, out); err != nil {
 		return err
 	}
@@ -226,6 +230,11 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 		hwDecode = []bool{true, false}
 	}
 	for i, hw := range hwDecode {
+		stage := p.encodingPass()
+		if i > 0 {
+			stage += " again, decoding on the CPU"
+		}
+		u.stage(stage)
 		err = run(p.encodeArgs(av, side, hw))
 		if err == nil || ctx.Err() != nil || i == len(hwDecode)-1 {
 			break
@@ -254,6 +263,7 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 			}
 			defer done()
 			u.step("encoding the audio again")
+			u.stage("encoding the audio again, on its own")
 			if err := run(p.audioArgs(audio)); err != nil {
 				return mediaInfo{}, err
 			}
@@ -261,10 +271,12 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 	}
 
 	u.step("remuxing")
+	u.stage("remuxing the passes together")
 	if err := run(p.remuxArgs(tmp, av, audio, side)); err != nil {
 		return mediaInfo{}, err
 	}
 	u.step("")
+	u.stage("checking the result")
 	info, err := verify(ctx, tmp, p)
 	if err != nil {
 		return info, fmt.Errorf("the result failed its checks, so the original was kept: %w", err)

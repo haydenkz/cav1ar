@@ -43,7 +43,7 @@ func runDaemon(ctx context.Context, q *encode.Queue, w *encode.Watcher, batch bo
 		}
 	})
 
-	state := map[int]encode.State{}
+	jobs := map[int]*jobLog{}
 	for {
 		evs := q.Next()
 		if evs == nil {
@@ -51,7 +51,7 @@ func runDaemon(ctx context.Context, q *encode.Queue, w *encode.Watcher, batch bo
 			return nil
 		}
 		for _, ev := range evs {
-			logEvent(ev, state)
+			logEvent(ev, jobs)
 		}
 		if srv != nil {
 			srv.Publish(evs)
@@ -62,36 +62,59 @@ func runDaemon(ctx context.Context, q *encode.Queue, w *encode.Watcher, batch bo
 	}
 }
 
-func logEvent(ev encode.Event, state map[int]encode.State) {
+// jobLog is what the daemon remembers about a job it has logged.
+type jobLog struct {
+	state encode.State
+	stage string // the stage it's in, which a failure is put down to
+}
+
+// logEvent logs a job's changes of state and the lines cav1ar writes about
+// it, leaving out ffmpeg's output. Every line starts with the job's number,
+// so jobs running side by side can be told apart, and the start of each
+// stage is marked out, so a job's lines read as the stages it went through.
+func logEvent(ev encode.Event, jobs map[int]*jobLog) {
 	j := ev.Job
 	name := filepath.Base(j.Input)
-	if strings.HasPrefix(ev.Line, "cav1ar: ") && !strings.HasPrefix(ev.Line, "cav1ar: ffmpeg ") {
-		log.Printf("%s: %s", name, strings.TrimPrefix(ev.Line, "cav1ar: "))
+	id := fmt.Sprintf("#%d", j.ID)
+	l, seen := jobs[j.ID]
+	if !seen {
+		l = &jobLog{}
+		jobs[j.ID] = l
 	}
-	prev, seen := state[j.ID]
-	if seen && prev == j.State {
+	if stage, ok := encode.Stage(ev.Line); ok {
+		l.stage = stage
+		log.Printf("%s   ▸ %s", id, stage)
+	} else if msg, ok := encode.Own(ev.Line); ok && !strings.HasPrefix(msg, "ffmpeg ") {
+		log.Printf("%s     %s", id, msg)
+	}
+	if seen && l.state == j.State {
 		return
 	}
-	state[j.ID] = j.State
+	l.state = j.State
+	at := ""
+	if l.stage != "" {
+		at = " while " + l.stage
+	}
 	switch j.State {
 	case encode.Queued:
-		log.Printf("queued %s", j.Input)
+		l.stage = "" // a retry starts over
+		log.Printf("%s queued %s", id, j.Input)
 	case encode.Running:
-		log.Printf("started %s", name)
+		log.Printf("%s started %s", id, name)
 	case encode.Done:
 		if j.Action == encode.ActionNone {
-			log.Printf("done %s: nothing to do", name)
+			log.Printf("%s done %s: nothing to do", id, name)
 			break
 		}
 		note := ""
 		if j.Note != "" {
 			note = ", " + j.Note
 		}
-		log.Printf("done %s → %s (%s in %s%s)", name, filepath.Base(j.Output), j.Action, j.Elapsed().Round(time.Second), note)
+		log.Printf("%s done %s → %s (%s in %s%s)", id, name, filepath.Base(j.Output), j.Action, j.Elapsed().Round(time.Second), note)
 	case encode.Failed:
-		log.Printf("failed %s: %v", name, j.Err)
+		log.Printf("%s failed %s%s: %v", id, name, at, j.Err)
 	case encode.Canceled:
-		log.Printf("canceled %s", name)
+		log.Printf("%s canceled %s%s", id, name, at)
 	}
 }
 

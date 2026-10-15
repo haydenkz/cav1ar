@@ -579,6 +579,24 @@ func (p *plan) audioCodecArgs() []string {
 	return args
 }
 
+// encodingPass says what the encoding pass does with the video and audio,
+// for the job's log.
+func (p *plan) encodingPass() string {
+	audio := false
+	for _, a := range p.audio {
+		audio = audio || !a.copy
+	}
+	switch {
+	case p.encodeVideo && audio:
+		return "encoding the video and audio"
+	case p.encodeVideo:
+		return "encoding the video, copying the audio"
+	case audio:
+		return "encoding the audio, copying the video"
+	}
+	return "copying the tracks"
+}
+
 // hasSide reports whether the plan keeps subtitles or attachments, which the
 // encoding pass writes to a file of their own.
 func (p *plan) hasSide() bool { return len(p.subs) > 0 || len(p.fonts) > 0 }
