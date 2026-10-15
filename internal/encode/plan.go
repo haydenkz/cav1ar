@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Action is what a file needs to match the settings.
@@ -145,9 +146,10 @@ func newPlan(in string, s Settings, info mediaInfo) (*plan, error) {
 		p.width, p.height = even(float64(p.width)), even(float64(p.height))
 	}
 
-	for _, st := range p.pickAudio(audio) {
+	picked := p.pickAudio(audio)
+	for _, st := range picked {
 		a := s.audioOut(st)
-		if s.AudioTracks == KeepBest && a.language == "" {
+		if s.AudioTracks == KeepBest && len(picked) == 1 && untagged(st) {
 			a.language = s.Language // the best track, untagged, is assumed to be in the language wanted
 		}
 		p.audio = append(p.audio, a)
@@ -185,7 +187,7 @@ func (p *plan) pickAudio(audio []streamInfo) []streamInfo {
 	case len(audio) == 0:
 		return nil
 	case s.AudioTracks == KeepLanguage:
-		matched := inLanguage(audio, s.Language)
+		matched := filter(audio, func(st streamInfo) bool { return speaks(st, s.Language) })
 		switch {
 		case len(matched) == 0:
 			p.note("No %s audio found, so keeping all %d audio tracks", s.Language, len(audio))
@@ -194,38 +196,113 @@ func (p *plan) pickAudio(audio []streamInfo) []streamInfo {
 			return matched
 		}
 	case s.AudioTracks == KeepBest:
-		best := bestAudio(audio, s.Language)
-		if len(audio) > 1 {
-			p.note("Keeping 1 of %d audio tracks: stream %d, %s", len(audio), best.Index, describeAudio(best))
+		kept := bestAudio(audio, s.Language)
+		switch {
+		case len(kept) > 1:
+			p.note("No %s audio found, so keeping the best track in each language: %d of %d", s.Language, len(kept), len(audio))
+		case len(audio) > 1:
+			p.note("Keeping 1 of %d audio tracks: stream %d, %s", len(audio), kept[0].Index, describeAudio(kept[0]))
 		}
-		return []streamInfo{best}
+		return kept
 	}
 	return audio
 }
 
-// bestAudio picks the track to keep when keeping one: one in lang that isn't
-// commentary, or failing that an untagged one, or failing that any that isn't
-// commentary, such as the original language of a film with no dub. Among
-// those it prefers the default track, then the most channels, which make the
-// best source for a downmix.
-func bestAudio(audio []streamInfo, lang string) streamInfo {
+// bestAudio picks the tracks to keep when keeping the best: the one in lang
+// that isn't commentary, or failing that an untagged one whose title doesn't
+// name another language. When there's neither, it keeps the best track in
+// each language rather than guess, since a dub in lang is sometimes tagged
+// wrong; a film with no dub then keeps its original language. Among tracks
+// it prefers the default, then the most channels, which make the best source
+// for a downmix.
+func bestAudio(audio []streamInfo, lang string) []streamInfo {
 	usable := func(st streamInfo) bool { return !st.Commentary && !commentaryTitle.MatchString(st.Title) }
-	pools := [][]streamInfo{
-		filter(audio, func(st streamInfo) bool { return sameLanguage(st.Language, lang) && usable(st) }),
-		filter(audio, func(st streamInfo) bool { return st.Language == "" && usable(st) }),
-		filter(audio, usable),
-		audio,
+	best := func(pool []streamInfo) streamInfo {
+		return slices.MaxFunc(pool, func(a, b streamInfo) int {
+			return slices.Compare(
+				[]int{b2i(a.Default), a.Channels, a.BitRate},
+				[]int{b2i(b.Default), b.Channels, b.BitRate})
+		})
 	}
-	for _, pool := range pools {
-		if len(pool) > 0 {
-			return slices.MaxFunc(pool, func(a, b streamInfo) int {
-				return slices.Compare(
-					[]int{b2i(a.Default), a.Channels, a.BitRate},
-					[]int{b2i(b.Default), b.Channels, b.BitRate})
-			})
+	if pool := filter(audio, func(st streamInfo) bool { return speaks(st, lang) && usable(st) }); len(pool) > 0 {
+		return []streamInfo{best(pool)}
+	}
+	if pool := filter(audio, func(st streamInfo) bool {
+		return untagged(st) && titleLanguage(st.Title) == "" && usable(st)
+	}); len(pool) > 0 {
+		return []streamInfo{best(pool)}
+	}
+	pool := filter(audio, usable)
+	if len(pool) == 0 {
+		return []streamInfo{best(audio)} // only commentary
+	}
+	byLanguage := map[string][]streamInfo{}
+	var order []string
+	for _, st := range pool {
+		l := normLanguage(st.Language)
+		if untagged(st) {
+			l = titleLanguage(st.Title)
+		}
+		if _, ok := byLanguage[l]; !ok {
+			order = append(order, l)
+		}
+		byLanguage[l] = append(byLanguage[l], st)
+	}
+	kept := make([]streamInfo, 0, len(order))
+	for _, l := range order {
+		kept = append(kept, best(byLanguage[l]))
+	}
+	slices.SortFunc(kept, func(a, b streamInfo) int { return a.Index - b.Index })
+	return kept
+}
+
+// untagged reports whether a track doesn't say what language it's in: no tag,
+// or one of the codes for undetermined, unknown or no language.
+func untagged(st streamInfo) bool {
+	switch normLanguage(st.Language) {
+	case "", "und", "unk", "mis", "zxx":
+		return true
+	}
+	return false
+}
+
+// speaks reports whether an audio track is in lang: tagged so, or untagged
+// with a title that names lang, as in "English DD 5.1".
+func speaks(st streamInfo, lang string) bool {
+	if sameLanguage(st.Language, lang) {
+		return true
+	}
+	return untagged(st) && titleLanguage(st.Title) == normLanguage(lang)
+}
+
+// languageNames are what a track title might call a language, keyed by its
+// ISO 639-2/T code.
+var languageNames = map[string][]string{
+	"eng": {"english", "englisch", "anglais", "inglés", "ingles", "inglese", "engels"},
+	"deu": {"german", "deutsch", "allemand", "alemán", "aleman", "tedesco", "duits"},
+	"fra": {"french", "français", "francais", "französisch", "francés", "frances", "francese", "frans"},
+	"spa": {"spanish", "español", "espanol", "castellano", "spanisch", "espagnol", "spagnolo"},
+	"ita": {"italian", "italiano", "italienisch", "italien"},
+	"jpn": {"japanese", "japanisch", "japonais", "japonés", "giapponese"},
+	"kor": {"korean", "koreanisch", "coréen", "coreano"},
+	"zho": {"chinese", "mandarin", "cantonese", "chinesisch", "chinois"},
+	"rus": {"russian", "russisch", "russe", "ruso"},
+	"por": {"portuguese", "português", "portugues", "portugiesisch"},
+	"nld": {"dutch", "nederlands", "niederländisch"},
+	"hin": {"hindi"},
+}
+
+// titleLanguage is the language a track's title names, by name or by a
+// three-letter code standing as a word, or "" if it names none.
+func titleLanguage(title string) string {
+	for _, w := range strings.FieldsFunc(strings.ToLower(title), func(r rune) bool { return !unicode.IsLetter(r) }) {
+		for code, names := range languageNames {
+			if slices.Contains(names, w) || (len(w) == 3 && normLanguage(w) == code) {
+				return code
+			}
 		}
 	}
-	return streamInfo{}
+	return ""
 }
 
 func describeAudio(st streamInfo) string {
