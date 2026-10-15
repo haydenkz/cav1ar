@@ -57,8 +57,7 @@ func Inspect(ctx context.Context, path string, s Settings) (Decision, error) {
 }
 
 // prepare plans what to do with in, tidying its subtitles first if the
-// settings say to and it is going to be rewritten anyway, or has tracks
-// that need telling apart.
+// settings say to and it has tracks that need telling apart.
 func prepare(ctx context.Context, in string, s Settings, log func(string)) (*plan, error) {
 	info, err := probe(ctx, in)
 	if err != nil {
@@ -73,7 +72,11 @@ func prepare(ctx context.Context, in string, s Settings, log func(string)) (*pla
 			return nil, err
 		}
 	}
-	if s.TidySubs && len(p.subs) > 0 && (p.checkSubs || p.action() == ActionRemux || p.action() == ActionEncode) {
+	// Subtitles are stored among the video, so reading them reads the start
+	// of the whole file: gigabytes for a film, which slows every other job
+	// reading from the same disks. Only do it when the flags leave two
+	// tracks in a language claiming the same role.
+	if p.checkSubs {
 		log("cav1ar: reading the subtitles")
 		stats, err := readSubs(ctx, in, p.subs)
 		if err != nil {

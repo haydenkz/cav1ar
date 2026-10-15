@@ -240,8 +240,8 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 			Inline(true),
 		huh.NewSelect[bool]().Key("tidySubs").
 			Title("Tidy subtitles").
-			Description("Reads the start of each track to drop ones in the wrong language and duplicates,\n"+
-				"and to flag forced and SDH tracks the source didn't.").
+			Description("When two tracks in a language look alike, reads the start of each track to drop\n"+
+				"duplicates and ones in the wrong language, and to flag forced and SDH tracks the source didn't.").
 			Options(
 				option("keep as they are", false, rec.TidySubs),
 				option("tidy", true, rec.TidySubs),
