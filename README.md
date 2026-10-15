@@ -6,7 +6,9 @@ keep every file in it encoded the way you like.
 - CPU (SVT-AV1) or GPU (NVIDIA NVENC, AMD/Intel VAAPI) encoding, with optional
   downscaling to a maximum resolution
 - Opus or AAC audio, downmixing, and language filters for audio and subtitles,
-  including keeping just the best audio track
+  including keeping just the best audio track. A track counts as being in your
+  language if it's tagged so, or untagged with a title that names it; if no
+  track is, the best of each language is kept rather than a guess
 - Subtitle tidying: drops tracks in the wrong language and duplicates, and
   flags forced and SDH tracks
 - Only does what a file needs: AV1 video is copied rather than re-encoded, and
