@@ -57,28 +57,32 @@ func readSubs(ctx context.Context, in string, subs []subOut) (map[int]*subStats,
 	stats := map[int]*subStats{}
 
 	// Image subtitles can't be read, but how many there are still says a lot.
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-read_intervals", "%+"+window,
-		"-count_packets", "-select_streams", "s", "-show_entries", "stream=index,codec_name,nb_read_packets",
-		"-of", "json", in).Output()
-	if err != nil {
-		return nil, fmt.Errorf("counting subtitles: %w", err)
-	}
-	var counts struct {
-		Streams []struct {
-			Index   int    `json:"index"`
-			Codec   string `json:"codec_name"`
-			Packets string `json:"nb_read_packets"`
-		} `json:"streams"`
-	}
-	if err := json.Unmarshal(out, &counts); err != nil {
-		return nil, fmt.Errorf("counting subtitles: %w", err)
-	}
-	for _, s := range counts.Streams {
-		n, _ := strconv.Atoi(s.Packets)
-		if s.Codec == "hdmv_pgs_subtitle" || s.Codec == "dvb_subtitle" {
-			n /= 2 // one packet shows a line, the next clears it
+	// Text tracks are counted as they are read below, so with no image
+	// tracks there's nothing to count.
+	if slices.ContainsFunc(subs, func(s subOut) bool { return !textSubs[s.Codec] }) {
+		out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-read_intervals", "%+"+window,
+			"-count_packets", "-select_streams", "s", "-show_entries", "stream=index,codec_name,nb_read_packets",
+			"-of", "json", in).Output()
+		if err != nil {
+			return nil, fmt.Errorf("counting subtitles: %w", err)
 		}
-		stats[s.Index] = &subStats{events: n}
+		var counts struct {
+			Streams []struct {
+				Index   int    `json:"index"`
+				Codec   string `json:"codec_name"`
+				Packets string `json:"nb_read_packets"`
+			} `json:"streams"`
+		}
+		if err := json.Unmarshal(out, &counts); err != nil {
+			return nil, fmt.Errorf("counting subtitles: %w", err)
+		}
+		for _, s := range counts.Streams {
+			n, _ := strconv.Atoi(s.Packets)
+			if s.Codec == "hdmv_pgs_subtitle" || s.Codec == "dvb_subtitle" {
+				n /= 2 // one packet shows a line, the next clears it
+			}
+			stats[s.Index] = &subStats{events: n}
+		}
 	}
 
 	dir, err := os.MkdirTemp("", "cav1ar-subs-")

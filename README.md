@@ -9,8 +9,9 @@ keep every file in it encoded the way you like.
   including keeping just the best audio track. A track counts as being in your
   language if it's tagged so, or untagged with a title that names it; if no
   track is, the best of each language is kept rather than a guess
-- Subtitle tidying: drops tracks in the wrong language and duplicates, and
-  flags forced and SDH tracks
+- Subtitle tidying: when two tracks in a language look alike, reads them to
+  drop duplicates and tracks in the wrong language, and to flag forced and SDH
+  tracks
 - Only does what a file needs: AV1 video is copied rather than re-encoded, and
   a file that only has the wrong name is renamed
 - Metadata stripping, custom titles, and release-style file names, taken from

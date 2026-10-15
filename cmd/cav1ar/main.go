@@ -52,7 +52,7 @@ func main() {
 	flag.Func("subs", "subtitles to keep: all, language or none (default \""+string(saved.Subtitles)+"\")",
 		func(v string) error { settings.Subtitles = encode.TrackFilter(v); return nil })
 	flag.BoolVar(&settings.TidySubs, "tidy-subs", saved.TidySubs,
-		"drop subtitles in the wrong language and duplicates, and flag forced and SDH ones")
+		"when two subtitle tracks in a language look alike, drop duplicates and ones in the wrong language, and flag forced and SDH ones")
 	flag.BoolVar(&settings.StripMetadata, "strip", saved.StripMetadata, "strip the source's titles and tags")
 	flag.StringVar(&settings.Title, "title", saved.Title, "title shown in players; placeholders as for -name")
 	flag.StringVar(&settings.ReleaseGroup, "group", saved.ReleaseGroup, "release group, for {group} and the ENCODED_BY tag")
