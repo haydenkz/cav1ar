@@ -4,6 +4,7 @@ package encode
 
 import (
 	"os"
+	"strings"
 	"time"
 )
 
@@ -44,7 +45,7 @@ type Job struct {
 	Input  string
 	Output string // where the result goes, once decided; the same as Input when nothing needed doing
 	Action Action // what the job decided the file needs, once it has
-	Step   string // what it's doing beyond that, such as "adding preroll"
+	Step   string // what it's doing beyond that, such as "adding the preroll"
 	State  State
 	Next   bool // queued ahead of the rest, such as a video that has just arrived
 
@@ -97,6 +98,22 @@ type Event struct {
 	Line string
 }
 
+// A job's log mixes ffmpeg's output with lines cav1ar writes itself, which
+// start with ownPrefix. Those marking the start of one of the job's stages,
+// such as an ffmpeg pass or checking the result, start with stagePrefix.
+const (
+	ownPrefix   = "cav1ar: "
+	stagePrefix = ownPrefix + "▸ "
+)
+
+// Own returns the message of a log line cav1ar wrote itself, and reports
+// whether it was one, rather than a line of ffmpeg's output.
+func Own(line string) (msg string, ok bool) { return strings.CutPrefix(line, ownPrefix) }
+
+// Stage returns the name of the stage a log line marks the start of, and
+// reports whether it marks one.
+func Stage(line string) (name string, ok bool) { return strings.CutPrefix(line, stagePrefix) }
+
 // updates is how a running encode reports back to the queue.
 type updates struct {
 	planned  func(Action, string) // what the job will do, and where the result will go
@@ -106,6 +123,9 @@ type updates struct {
 	note     func(note string) // sets Job.Note
 	step     func(step string) // sets Job.Step
 }
+
+// stage marks the start of one of the job's stages in its log.
+func (u updates) stage(name string) { u.log(stagePrefix + name) }
 
 type progress struct {
 	done     float64 // 0..1

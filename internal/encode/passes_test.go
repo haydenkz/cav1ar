@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -159,5 +160,36 @@ func TestRemuxTakesTheAudioFromItsOwnPass(t *testing.T) {
 	}
 	if count(got, "subtitle") != 1 {
 		t.Errorf("want the subtitle track from the side file, got %d", count(got, "subtitle"))
+	}
+}
+
+// A job's log marks the start of each of its stages, in the order it goes
+// through them.
+func TestEncodeFileLogsItsStages(t *testing.T) {
+	if err := CheckEncoder(EncoderCPU); err != nil {
+		t.Skip(err)
+	}
+	dir, outDir := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	src := makeSource(t, dir)
+	var stages []string
+	u := noUpdates()
+	u.log = func(line string) {
+		if stage, ok := Stage(line); ok {
+			stages = append(stages, stage)
+		}
+	}
+	if err := encodeFile(context.Background(), src, testSettings(outDir), u); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"checking the file",
+		"encoding the video and audio",
+		"remuxing the passes together",
+		"checking the result",
+		"moving the result into place",
+	}
+	if !slices.Equal(stages, want) {
+		t.Errorf("stages logged:\n  %q\nwant:\n  %q", stages, want)
 	}
 }

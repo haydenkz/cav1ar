@@ -310,7 +310,8 @@ func av1Config(ctx context.Context, path string) ([]byte, error) {
 
 // addPreroll writes main, with the preroll ahead of it, to out.
 func addPreroll(ctx context.Context, s Settings, main string, mainInfo mediaInfo, out string, u updates) (time.Duration, error) {
-	u.step("adding preroll")
+	u.step("adding the preroll")
+	u.stage("adding the preroll")
 	pre, length, err := prerollFor(ctx, s, main, mainInfo, u)
 	if err != nil {
 		return 0, err
@@ -368,7 +369,6 @@ func addPreroll(ctx context.Context, s Settings, main string, mainInfo mediaInfo
 	}
 	args = append(args, "-metadata", prerollTag+"="+id+" "+seconds6(length),
 		"-max_muxing_queue_size", "4096", "-f", "matroska", "-progress", "pipe:1", out)
-	u.log("cav1ar: adding the preroll")
 	if err := runFFmpeg(ctx, args, mainInfo.Duration+length, u); err != nil {
 		return 0, err
 	}
