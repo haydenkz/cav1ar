@@ -172,11 +172,7 @@ func (s *Server) recordLocked(ev encode.Event) {
 			s.logOrder = s.logOrder[1:]
 		}
 	}
-	lines := append(s.logs[j.ID], ev.Line)
-	if len(lines) > logLines {
-		lines = lines[len(lines)-logLines:]
-	}
-	s.logs[j.ID] = lines
+	s.logs[j.ID] = encode.TrimLog(append(s.logs[j.ID], ev.Line), logLines)
 }
 
 func (s *Server) sendLocked(msg message) {

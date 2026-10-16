@@ -363,10 +363,20 @@ func (m Model) logLines(id int) []string {
 	return lines
 }
 
+// appendLog adds a line to job id's log, dropping the oldest of ffmpeg's
+// lines past maxLogLines, as encode.TrimLog does, so the steps stay.
 func (m *Model) appendLog(id int, line logEntry) {
 	lines := append(m.logs[id], line)
-	if len(lines) > maxLogLines {
-		lines = lines[len(lines)-maxLogLines:]
+	if over := len(lines) - maxLogLines; over > 0 {
+		kept := make([]logEntry, 0, maxLogLines)
+		for _, e := range lines {
+			if !e.own && over > 0 {
+				over--
+				continue
+			}
+			kept = append(kept, e)
+		}
+		lines = kept[max(len(kept)-maxLogLines, 0):]
 	}
 	m.logs[id] = lines
 	m.logDirty = m.logDirty || id == m.cursor
@@ -468,10 +478,11 @@ func (m *Model) layout() {
 	m.help.SetWidth(m.width - 2)
 	avail := m.bodyHeight()
 
-	// The queue gets the room, and the log what's left: a few lines of
-	// steps, or most of the screen for the full log.
+	// The queue gets the room, and the log what's left: enough for a whole
+	// job's steps, which run to a dozen lines, or most of the screen for the
+	// full log. Either way the queue keeps at least half.
 	shown := m.rows()
-	minLog := 7
+	minLog := min(15, avail/2)
 	if m.fullLog {
 		minLog = avail * 3 / 5
 	}
