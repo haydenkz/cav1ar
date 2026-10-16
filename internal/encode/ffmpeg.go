@@ -113,7 +113,11 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 		return nil
 	}
 
-	u.log(fmt.Sprintf("cav1ar: %s, because of: %s", action, strings.Join(p.reasons(), "; ")))
+	plan := "plan: "
+	if action == ActionRetag {
+		plan = "plan, editing the file in place: "
+	}
+	u.log("cav1ar: " + plan + strings.Join(p.reasons(), " · "))
 	switch {
 	case out == in && !s.DeleteOriginal:
 		return errors.New("the result would replace the original, which the settings keep; " +
@@ -216,6 +220,22 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 	return nil
 }
 
+// assembling names the stage that copies the encoding pass's files into one,
+// by what goes into it.
+func (p *plan) assembling() string {
+	parts := []string{"video"}
+	if len(p.audio) > 0 {
+		parts = append(parts, "audio")
+	}
+	if len(p.subs) > 0 {
+		parts = append(parts, "subtitles")
+	}
+	if len(parts) == 1 {
+		return "writing the file"
+	}
+	return "putting the " + joinAnd(parts) + " together"
+}
+
 // encodeAndRemux writes the result to tmp: an encoding pass writes the video
 // and audio, and the subtitles and attachments, to files of their own in
 // work, and a remuxing pass puts them together; see plan.encodeArgs. It
@@ -294,8 +314,8 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 		}
 	}
 
-	u.step("remuxing")
-	u.stage("remuxing the passes together")
+	u.step("putting together")
+	u.stage(p.assembling())
 	if err := run(p.remuxArgs(tmp, av, audio, side), frameRate(p.video)); err != nil {
 		return mediaInfo{}, err
 	}

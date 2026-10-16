@@ -25,7 +25,7 @@ func TestLogEventMarksStages(t *testing.T) {
 	for _, line := range []string{
 		"",
 		"cav1ar: ▸ checking the file",
-		"cav1ar: remux, because of: audio aac 2ch",
+		"cav1ar: plan: audio AAC 2.0 → Opus 2.0",
 		"cav1ar: ▸ encoding the audio, copying the video",
 		"cav1ar: ffmpeg -i in.mkv out.mkv",
 		"frame=  100 fps=50",
@@ -39,7 +39,7 @@ func TestLogEventMarksStages(t *testing.T) {
 	want := strings.Join([]string{
 		"#7 started Show S01E01.mkv",
 		"#7   ▸ checking the file",
-		"#7     remux, because of: audio aac 2ch",
+		"#7     plan: audio AAC 2.0 → Opus 2.0",
 		"#7   ▸ encoding the audio, copying the video",
 		"#7   ▸ checking the result",
 		"#7 failed Show S01E01.mkv while checking the result: the result failed its checks",

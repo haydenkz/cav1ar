@@ -210,7 +210,7 @@ func TestStepsShowOnlyCav1arsOwnLines(t *testing.T) {
 	m.apply([]encode.Event{
 		{Job: job, Line: "cav1ar: ▸ encoding the video"},
 		{Job: job, Line: "Stream #0:0 -> #0:0 (h264 -> av1_nvenc)"},
-		{Job: job, Line: "cav1ar: encode, because of: video h264"},
+		{Job: job, Line: "cav1ar: plan: video H.264 → AV1"},
 	})
 	if got := len(m.logLines(0)); got != 2 {
 		t.Errorf("the steps show %d lines, want cav1ar's 2", got)
