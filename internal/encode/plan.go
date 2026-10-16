@@ -350,6 +350,13 @@ func (p *plan) pickSubs(subs []streamInfo) []streamInfo {
 		subs = matched
 	}
 	return filter(subs, func(st streamInfo) bool {
+		// Besides having nothing to show, a stream that never sends a packet
+		// stalls ffmpeg: it holds back the other streams waiting for one, and
+		// ends the encode at the end of the file with seconds of video done.
+		if st.Empty {
+			p.note("Dropping subtitle track %d: it's empty", st.Index)
+			return false
+		}
 		if copyableSubs[st.Codec] || st.Codec == "mov_text" {
 			return true
 		}
