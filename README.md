@@ -12,8 +12,10 @@ keep every file in it encoded the way you like.
 - Subtitle tidying: when two tracks in a language look alike, reads them to
   drop duplicates and tracks in the wrong language, and to flag forced and SDH
   tracks
-- Only does what a file needs: AV1 video is copied rather than re-encoded, and
-  a file that only has the wrong name is renamed
+- Only does what a file needs: AV1 video is copied rather than re-encoded, a
+  file that only has the wrong name is renamed, and with MKVToolNix installed,
+  an MKV whose only problems are its tags, track titles, flags or chapters is
+  fixed in place instead of rewritten
 - Metadata stripping, custom titles, and release-style file names, taken from
   Movies and TV folders the way media servers lay them out
 - Folder watching, with an optional background service
@@ -21,6 +23,8 @@ keep every file in it encoded the way you like.
 ## Install
 
 Needs Linux, Go 1.27+, and ffmpeg built with `libsvtav1` and `libopus`.
+MKVToolNix (`mkvpropedit` and `mkvextract`) is optional: with it, fixing a
+file's metadata takes a moment instead of a rewrite of the whole file.
 
 ```sh
 git clone https://github.com/haydenkz/cav1ar

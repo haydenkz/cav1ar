@@ -215,8 +215,9 @@ func runDryRun(ctx context.Context, s encode.Settings, paths []string) error {
 			}
 		}
 	}
-	fmt.Printf("\n%d to encode, %d to remux, %d to rename, %d fine, %d failed\n",
-		counts[encode.ActionEncode], counts[encode.ActionRemux], counts[encode.ActionRename], counts[encode.ActionNone], failed)
+	fmt.Printf("\n%d to encode, %d to remux, %d to retag, %d to rename, %d fine, %d failed\n",
+		counts[encode.ActionEncode], counts[encode.ActionRemux], counts[encode.ActionRetag], counts[encode.ActionRename],
+		counts[encode.ActionNone], failed)
 	return nil
 }
 

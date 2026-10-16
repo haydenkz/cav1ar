@@ -121,6 +121,26 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 	case out != in && exists(out):
 		return fmt.Errorf("%s already exists", filepath.Base(out))
 	}
+	if action == ActionRetag {
+		u.stage("fixing the tags in place")
+		err := retag(ctx, p)
+		if err == nil && out != in {
+			err = renameNoReplace(in, out)
+		}
+		if err == nil {
+			u.log("cav1ar: fixed the tags in place, without rewriting the file")
+			if out != in {
+				u.log("cav1ar: renamed it to " + filepath.Base(out))
+			}
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		u.log("cav1ar: couldn't fix the tags in place, so remuxing it instead: " + err.Error())
+		action = ActionRemux
+		u.planned(action, out)
+	}
 	if action == ActionEncode {
 		if err := CheckEncoder(s.Encoder); err != nil {
 			return err
