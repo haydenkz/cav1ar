@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +39,7 @@ type streamInfo struct {
 	Title      string
 
 	CoverArt        bool // a still image attached as a video stream
+	Empty           bool // the file's statistics say the stream holds no frames at all
 	Default         bool
 	Forced          bool
 	HearingImpaired bool
@@ -165,18 +168,21 @@ func probe(ctx context.Context, in string) (mediaInfo, error) {
 		if st.Duration == 0 {
 			st.Duration = durationTag(tags)
 		}
+		if n, ok := statTag(tags, "NUMBER_OF_FRAMES"); ok && strings.TrimSpace(n) == "0" {
+			st.Empty = true
+		}
 		info.Streams = append(info.Streams, st)
 	}
 	return info, nil
 }
 
-// ratio reads a frame rate such as "24000/1001".
 // frameRate is st's frame rate, or 0 if it doesn't say.
 func frameRate(st streamInfo) float64 {
 	fps, _ := ratio(st.FrameRate)
 	return fps
 }
 
+// ratio reads a frame rate such as "24000/1001".
 func ratio(s string) (float64, bool) {
 	num, den, ok := strings.Cut(s, "/")
 	n, err1 := strconv.ParseFloat(num, 64)
@@ -199,18 +205,36 @@ func seconds(s string) time.Duration {
 // "01:48:06.147000000". mkvmerge may suffix its name with a language, as in
 // DURATION-eng.
 func durationTag(tags map[string]string) time.Duration {
-	for k, v := range tags {
-		if k != "DURATION" && !strings.HasPrefix(k, "DURATION-") {
-			continue
-		}
-		h, rest, ok1 := strings.Cut(v, ":")
-		m, sec, ok2 := strings.Cut(rest, ":")
-		hh, err1 := strconv.Atoi(h)
-		mm, err2 := strconv.Atoi(m)
-		ss, err3 := strconv.ParseFloat(sec, 64)
-		if ok1 && ok2 && err1 == nil && err2 == nil && err3 == nil {
-			return time.Duration((float64(hh*3600+mm*60) + ss) * float64(time.Second))
-		}
+	v, ok := statTag(tags, "DURATION")
+	if !ok {
+		return 0
+	}
+	h, rest, ok1 := strings.Cut(v, ":")
+	m, sec, ok2 := strings.Cut(rest, ":")
+	hh, err1 := strconv.Atoi(h)
+	mm, err2 := strconv.Atoi(m)
+	ss, err3 := strconv.ParseFloat(sec, 64)
+	if ok1 && ok2 && err1 == nil && err2 == nil && err3 == nil {
+		return time.Duration((float64(hh*3600+mm*60) + ss) * float64(time.Second))
 	}
 	return 0
+}
+
+// statTag reads one of the statistics tags Matroska muxers put on each
+// stream, such as DURATION or NUMBER_OF_FRAMES. mkvmerge may also write it
+// with a language on its name, as in DURATION-eng, and ffmpeg copies those
+// from the source as they are while writing the plain one afresh, so the
+// plain one is preferred: copied over, the other may describe the source
+// rather than this file.
+func statTag(tags map[string]string, name string) (string, bool) {
+	if v, ok := tags[name]; ok {
+		return v, true
+	}
+	keys := slices.Sorted(maps.Keys(tags))
+	for _, k := range keys {
+		if strings.HasPrefix(k, name+"-") {
+			return tags[k], true
+		}
+	}
+	return "", false
 }
