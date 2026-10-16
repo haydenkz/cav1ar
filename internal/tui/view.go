@@ -41,33 +41,35 @@ func (m Model) render() string {
 			m.st.box(m.logTitle(), m.logBody(), m.width, m.logH),
 		)
 	case screenSettings:
-		body = m.st.box("Settings", m.settingsTabs()+"\n\n"+m.form.View(), m.width, m.bodyHeight())
+		body = m.st.box("Settings", m.settingsView(), m.width, m.bodyHeight())
 	case screenAdd:
 		body = m.st.box(m.pickerTitle(), m.picker.View(), m.width, m.bodyHeight())
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, m.header(), "", body, m.footer())
 }
 
+// header says what cav1ar is doing, how far through the queue it is and how
+// long that has left, and how much space it has saved.
 func (m Model) header() string {
 	left := m.st.logo.Render("cav1ar") + " "
+	running := m.count(encode.Running)
 	switch {
 	case m.lost:
-		left += m.st.badText.Render("lost the daemon; reopen cav1ar") + "  "
-	case m.queue.Daemon():
-		left += m.st.okText.Render("daemon") + "  "
-	}
-	// Ahead of the settings, which can run past the edge.
-	switch n := m.count(encode.Running); {
-	case m.paused, m.holding && n == 0:
-		left += m.st.warnText.Render("⏸ paused") + "  "
+		left += m.st.badText.Render("lost the daemon; reopen cav1ar")
+	case m.paused, m.holding && running == 0:
+		left += m.st.warnText.Render("⏸ paused")
 	case m.holding:
-		left += m.st.warnText.Render(fmt.Sprintf("⏸ pausing once %d %s", n, plural(n, "job finishes", "jobs finish"))) + "  "
+		left += m.st.warnText.Render(fmt.Sprintf("⏸ pausing once %d %s", running, plural(running, "job finishes", "jobs finish")))
+	case running > 0:
+		left += m.st.okText.Render("encoding")
+	default:
+		left += m.st.dim.Render("idle")
 	}
-	left += m.st.dim.Render(m.settings.Summary())
+	if m.queue.Daemon() && !m.lost {
+		left += m.st.dim.Render(" · daemon")
+	}
 	if n := len(m.settings.Watch); n > 0 && m.queue.Watching() {
-		left += "  " + m.st.okText.Render(fmt.Sprintf("watching %d %s", n, plural(n, "folder", "folders")))
-	} else if n > 0 {
-		left += "  " + m.st.dim.Render("folders watched by another cav1ar")
+		left += m.st.dim.Render(fmt.Sprintf(" · watching %d %s", n, plural(n, "folder", "folders")))
 	}
 
 	var parts []string
@@ -76,12 +78,18 @@ func (m Model) header() string {
 			parts = append(parts, s.Render(fmt.Sprintf("%s %d", label, n)))
 		}
 	}
-	add(m.count(encode.Running), m.st.selected, "● running")
-	add(m.count(encode.Queued), m.st.dim, "○ queued")
-	add(m.count(encode.Done), m.st.okText, "✓ done")
-	add(m.count(encode.Failed), m.st.badText, "✗ failed")
-	add(m.count(encode.Canceled), m.st.dim, "– canceled")
-	right := strings.Join(parts, "   ")
+	add(running, m.st.selected, "●")
+	add(m.count(encode.Queued), m.st.dim, "○")
+	add(m.count(encode.Done), m.st.okText, "✓")
+	add(m.count(encode.Failed), m.st.badText, "✗")
+	sum := m.summarize()
+	if sum.eta > 0 {
+		parts = append(parts, m.st.dim.Render("about "+fmtRough(sum.eta)+" left"))
+	}
+	if saved := sum.savedAll; saved > 0 {
+		parts = append(parts, m.st.okText.Render(fmtSize(saved)+" saved"))
+	}
+	right := strings.Join(parts, "  ")
 
 	gap := m.width - 2 - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 2 { // no room for the counts
@@ -97,14 +105,16 @@ func (m Model) footer() string {
 		n := m.count(encode.Running)
 		s = m.st.warnText.Render(fmt.Sprintf(
 			"%d %s still running. Press q again to cancel and quit.", n, plural(n, "encode", "encodes")))
+	case m.confirmDiscard:
+		s = m.st.warnText.Render("You have unsaved changes. Press esc again to discard them, or ctrl+s to save.")
 	case m.status != "" && m.statusBad:
 		s = m.st.badText.Render(m.status)
 	case m.status != "":
 		s = m.st.okText.Render(m.status)
 	case m.screen == screenSettings:
-		s = m.help.ShortHelpView(m.keys.settingsHelp())
+		s = m.help.ShortHelpView(m.keys.settingsHelp(m.section == sectionFolders))
 	case m.screen == screenAdd:
-		s = m.help.ShortHelpView(m.keys.pickerHelp())
+		s = m.help.ShortHelpView(m.keys.pickerHelp(m.pick))
 	default:
 		s = m.help.View(m.keys)
 	}
@@ -112,24 +122,13 @@ func (m Model) footer() string {
 	return lipgloss.NewStyle().Padding(0, 1).MaxWidth(m.width).Render(s)
 }
 
-// settingsTabs shows the settings pages, highlighting the current one.
-func (m Model) settingsTabs() string {
-	current := m.settingsPage()
-	tabs := make([]string, len(settingsPages))
-	for i, name := range settingsPages {
-		if i == current {
-			tabs[i] = m.st.selected.Render(name)
-		} else {
-			tabs[i] = m.st.dim.Render(name)
-		}
-	}
-	return ansi.Truncate(strings.Join(tabs, m.st.dim.Render("  ›  ")), m.width-4, "…")
-}
-
 // pickerTitle names the folder being browsed, dropping the start of the path
 // rather than the end when it is too long to fit.
 func (m Model) pickerTitle() string {
-	const prefix = "Add files · "
+	prefix := "Add files · "
+	if m.pick == pickWatch {
+		prefix = "Choose a folder to watch · "
+	}
 	dir := shortPath(m.picker.CurrentDirectory)
 	for _, f := range m.settings.Watch {
 		if f.Path != m.picker.CurrentDirectory {
@@ -151,28 +150,35 @@ func (m Model) pickerTitle() string {
 }
 
 func (m Model) jobsTitle() string {
-	title := "Jobs"
+	title := "Queue"
 	if shown := m.rows(); len(shown) > m.jobsH-2 {
-		title = fmt.Sprintf("Jobs %d/%d", slices.Index(shown, m.cursor)+1, len(shown))
+		title = fmt.Sprintf("Queue %d/%d", slices.Index(shown, m.cursor)+1, len(shown))
+	}
+	if sum := m.summarize(); sum.todo > 0 {
+		title += fmt.Sprintf(" · %d to do, %s", sum.todo, fmtSize(sum.left))
 	}
 	if n := m.count(encode.Done) + m.count(encode.Canceled); m.hideDone && n > 0 {
 		title += fmt.Sprintf(" · %d finished hidden", n)
 	}
-	if s := m.progressSummary(); s != "" {
-		title += " · " + s
-	}
 	return title
 }
 
-// progressSummary says how much is left to do, about how long it will take
-// at the pace of the last hour, and how much smaller the results have come
-// out than their sources.
-func (m Model) progressSummary() string {
+// summary is how much is left to do, about how long that will take at the
+// pace of the last hour, and how much smaller results have come out than
+// their sources: in this list, and over every run.
+type summary struct {
+	todo            int
+	left            int64
+	eta             time.Duration
+	saved, savedAll int64
+}
+
+func (m Model) summarize() summary {
 	now := time.Now()
 	since := now.Add(-time.Hour) // the pace is taken over this hour, or since work began
 	began := now
-	var left, recent, saved int64
-	todo := 0
+	var sum summary
+	var recent int64
 	for _, j := range m.jobs {
 		if !j.Started.IsZero() && j.Started.Before(began) {
 			began = j.Started
@@ -180,49 +186,33 @@ func (m Model) progressSummary() string {
 		worked := j.Action == encode.ActionRemux || j.Action == encode.ActionEncode
 		switch j.State {
 		case encode.Queued:
-			todo++
-			left += j.InSize
+			sum.todo++
+			sum.left += j.InSize
 		case encode.Running:
-			todo++
-			left += int64(float64(j.InSize) * (1 - j.Progress))
+			sum.todo++
+			sum.left += int64(float64(j.InSize) * (1 - j.Progress))
 		case encode.Done:
 			if worked && j.InSize > 0 && j.OutSize > 0 {
-				saved += j.InSize - j.OutSize
+				sum.saved += j.InSize - j.OutSize
 			}
 			if worked && j.Finished.After(since) {
 				recent += j.InSize
 			}
 		}
 	}
-
-	var parts []string
-	if todo > 0 {
-		s := fmt.Sprintf("%d to do, %s", todo, fmtSize(left))
-		if began.After(since) {
-			since = began
-		}
-		// Guessing from less than a few minutes' work would swing about.
-		if window := now.Sub(since); window >= 5*time.Minute && recent > 0 {
-			eta := time.Duration(float64(left) / float64(recent) * float64(window))
-			s += ", about " + fmtRough(eta) + " left"
-		}
-		parts = append(parts, s)
+	if began.After(since) {
+		since = began
 	}
-	switch {
-	case saved > 0:
-		parts = append(parts, "saved "+fmtSize(saved))
-	case saved < 0:
-		parts = append(parts, fmtSize(-saved)+" bigger")
+	// Guessing from less than a few minutes' work would swing about.
+	if window := now.Sub(since); sum.todo > 0 && window >= 5*time.Minute && recent > 0 {
+		sum.eta = time.Duration(float64(sum.left) / float64(recent) * float64(window))
 	}
 	// Over every run, which outlasts the jobs listed here.
-	if all, n := m.queue.Totals(); n > 0 && all != saved {
-		if all >= 0 {
-			parts = append(parts, fmt.Sprintf("%s saved over %d %s in all", fmtSize(all), n, plural(n, "file", "files")))
-		} else {
-			parts = append(parts, fmt.Sprintf("%s bigger over %d %s in all", fmtSize(-all), n, plural(n, "file", "files")))
-		}
+	sum.savedAll = sum.saved
+	if all, n := m.queue.Totals(); n > 0 {
+		sum.savedAll = all
 	}
-	return strings.Join(parts, " · ")
+	return sum
 }
 
 // columns are the widths of the parts of a job row, in cells.
@@ -275,10 +265,16 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 	var icon, bar, pct, info string
 	switch j.State {
 	case encode.Queued:
-		icon = m.st.dim.Render("○")
-		bar = m.st.dim.Render(cell("queued", c.bar))
+		label := "queued"
 		if j.Next {
-			icon, bar = m.st.selected.Render("○"), m.st.selected.Render(cell("up next", c.bar))
+			label = "up next"
+		}
+		if j.Priority != 0 {
+			label += fmt.Sprintf(" · priority %+d", j.Priority)
+		}
+		icon, bar = m.st.dim.Render("○"), m.st.dim.Render(cell(label, c.bar))
+		if j.Next || j.Priority > 0 {
+			icon, bar = m.st.selected.Render("○"), m.st.selected.Render(cell(label, c.bar))
 		}
 		if j.InSize > 0 {
 			info = m.st.dim.Render(cell(fmtSize(j.InSize), c.info))
@@ -402,11 +398,15 @@ func doneInfo(j encode.Job) string {
 }
 
 func (m Model) logTitle() string {
+	title := "Steps"
+	if m.fullLog {
+		title = "Log"
+	}
 	if m.cursor >= len(m.jobs) {
-		return "Log"
+		return title
 	}
 	j := m.jobs[m.cursor]
-	title := "Log · " + filepath.Base(j.Input)
+	title += " · " + filepath.Base(j.Input)
 	if j.Output != "" {
 		title += " → " + filepath.Base(j.Output)
 	}
@@ -414,7 +414,10 @@ func (m Model) logTitle() string {
 }
 
 func (m Model) logBody() string {
-	if m.cursor >= len(m.logs) || len(m.logs[m.cursor]) == 0 {
+	if m.cursor >= len(m.logs) || len(m.logLines(m.cursor)) == 0 {
+		if m.cursor < len(m.logs) && len(m.logs[m.cursor]) > 0 {
+			return m.st.dim.Render("Only ffmpeg's output so far. Press enter for the full log.")
+		}
 		return m.st.dim.Render("No output yet")
 	}
 	return m.log.View()
