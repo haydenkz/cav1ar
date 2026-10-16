@@ -207,7 +207,7 @@ func runDryRun(ctx context.Context, s encode.Settings, paths []string) error {
 					fmt.Printf("    -> %s\n", filepath.Base(d.Output))
 				}
 				if len(d.Reasons) > 0 {
-					fmt.Printf("       %s\n", strings.Join(d.Reasons, "; "))
+					fmt.Printf("       %s\n", strings.Join(d.Reasons, " · "))
 				}
 				for _, n := range d.Notes {
 					fmt.Printf("       %s\n", n)

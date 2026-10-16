@@ -418,29 +418,30 @@ func (p *plan) encodedBy() string {
 	return p.info.Tags["ENCODED_BY"]
 }
 
-// reasons says what about the file doesn't match the settings, apart from
-// its name. An empty list means its contents can stay as they are.
+// reasons says what a job would change to bring the file into line with the
+// settings, apart from its name, a few words for each. An empty list means its
+// contents can stay as they are.
 func (p *plan) reasons() []string {
 	var out []string
 	add := func(format string, args ...any) { out = append(out, fmt.Sprintf(format, args...)) }
 	s := p.settings
 
 	if p.video.Codec != "av1" {
-		add("video %s", p.video.Codec)
+		add("video %s → AV1", videoName(p.video.Codec))
 	}
 	if p.tooBig {
-		add("%dx%d > %dp", p.video.Width, p.video.Height, s.MaxHeight)
+		add("scale %d×%d down to %dp", p.video.Width, p.video.Height, s.MaxHeight)
 	}
 	for _, a := range p.audio {
 		if !a.copy {
-			add("audio %s %dch", a.Codec, a.Channels)
+			add("audio %s → %s", audioName(a.Codec, a.Channels), audioName(string(a.codec), a.channels))
 		}
 	}
 	if slices.ContainsFunc(p.subs, func(sub subOut) bool { return sub.codec != "copy" }) {
-		add("subtitles to srt")
+		add("subtitles → SRT")
 	}
 	if p.checkSubs {
-		add("subtitles to check")
+		add("read the subtitles to tell tracks apart")
 	}
 	if slices.ContainsFunc(p.subs, func(sub subOut) bool { return sub.forced != sub.Forced || sub.sdh != sub.HearingImpaired }) {
 		add(reasonSubFlags)
@@ -470,22 +471,29 @@ func (p *plan) reasons() []string {
 	if len(dropped) > 0 {
 		var parts []string
 		for _, kind := range slices.Sorted(maps.Keys(dropped)) {
-			parts = append(parts, fmt.Sprintf("%d %s", dropped[kind], kind))
+			switch n := dropped[kind]; kind {
+			case "cover art":
+				parts = append(parts, "the cover art")
+			case "attachment":
+				parts = append(parts, fmt.Sprintf("%d %s", n, pick(n, "attachment", "attachments")))
+			default:
+				parts = append(parts, fmt.Sprintf("%d %s %s", n, kind, pick(n, "track", "tracks")))
+			}
 		}
-		add("drop %s", strings.Join(parts, ", "))
+		add("drop %s", joinAnd(parts))
 	}
 
-	if !strings.EqualFold(filepath.Ext(p.in), ".mkv") {
-		add("to mkv")
+	if ext := filepath.Ext(p.in); !strings.EqualFold(ext, ".mkv") {
+		add("%s → MKV", strings.ToUpper(strings.TrimPrefix(ext, ".")))
 	}
 	switch {
 	case p.prerollWant == p.prerollHave:
 	case p.prerollHave == "":
-		add("add preroll")
+		add("add the preroll")
 	case p.prerollWant == "":
-		add("remove preroll")
+		add("remove the preroll")
 	default:
-		add("replace preroll")
+		add("replace the preroll")
 	}
 	if p.tagsDiffer() {
 		add(reasonTags)
@@ -496,12 +504,49 @@ func (p *plan) reasons() []string {
 	return out
 }
 
+// videoName is how people write a video codec, e.g. H.264 for h264.
+func videoName(codec string) string {
+	switch codec {
+	case "h264":
+		return "H.264"
+	case "hevc":
+		return "HEVC"
+	case "mpeg4":
+		return "MPEG-4"
+	case "mpeg2video":
+		return "MPEG-2"
+	case "vc1":
+		return "VC-1"
+	}
+	return strings.ToUpper(codec)
+}
+
+// audioName is an audio format as release names write it, e.g. DDP 5.1.
+func audioName(codec string, channels int) string {
+	return strings.TrimSpace(codecTag(codec) + " " + channelTag(channels))
+}
+
+// joinAnd lists parts as a sentence would: "a", "a and b", "a, b and c".
+func joinAnd(parts []string) string {
+	if len(parts) < 2 {
+		return strings.Join(parts, "")
+	}
+	return strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+}
+
+func pick(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
 // Reasons that only concern a file's metadata, which a retag fixes without
 // rewriting the file.
 const (
-	reasonSubFlags = "subtitle flags"
-	reasonTags     = "tags"
-	reasonChapters = "chapters"
+	reasonSubFlags = "set subtitle flags"
+	reasonTags     = "update tags"
+	reasonChapters = "strip chapters"
 )
 
 // retaggable reports whether the file can be brought into line by editing

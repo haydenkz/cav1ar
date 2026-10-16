@@ -58,7 +58,7 @@ func TestRetagFixesMetadataWithoutRewritingTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if p.action() != ActionRetag {
-		t.Fatalf("want a retag, got %s because of %q", p.action(), p.reasons())
+		t.Fatalf("want a retag, got %s, plan %q", p.action(), p.reasons())
 	}
 	if err := encodeFile(ctx, encoded, second, noUpdates()); err != nil {
 		t.Fatal(err)
@@ -101,6 +101,6 @@ func TestRetagFixesMetadataWithoutRewritingTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if a := again.action(); a != ActionNone {
-		t.Errorf("after the retag, want nothing left to do, got %s because of %q", a, again.reasons())
+		t.Errorf("after the retag, want nothing left to do, got %s, plan %q", a, again.reasons())
 	}
 }
