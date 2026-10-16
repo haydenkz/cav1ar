@@ -405,6 +405,13 @@ func folderPath(s Settings, path string) string {
 // match before are checked again.
 const matchRules = 2
 
+// watchedPlace is a WatchFolder without its priority, encoded as one was
+// before it had one, so adding priorities doesn't change a fingerprint.
+type watchedPlace struct {
+	Path string     `json:"path"`
+	Kind FolderKind `json:"kind,omitempty"`
+}
+
 // fingerprint sums up the settings that decide whether a file matches them,
 // so files are checked again when those change. How things are encoded
 // doesn't count: it never makes a finished file not match.
@@ -418,10 +425,15 @@ func fingerprint(s Settings) string {
 		AudioTracks, Subtitles         TrackFilter
 		TidySubs, StripMetadata        bool
 		Title, ReleaseGroup, Name, Out string
-		Watch                          []WatchFolder
+		Watch                          []watchedPlace
 		Preroll                        string
 	}{matchRules, s.MaxHeight, s.AudioCodec, s.AudioKbps == AudioCopy, s.Downmix, s.Language, s.AudioTracks, s.Subtitles,
-		s.TidySubs, s.StripMetadata, s.Title, s.ReleaseGroup, s.NameTemplate, s.OutDir, s.Watch, s.Preroll}
+		s.TidySubs, s.StripMetadata, s.Title, s.ReleaseGroup, s.NameTemplate, s.OutDir, nil, s.Preroll}
+	// Which folders, and how their videos are named, decide whether a file
+	// matches; the order jobs run in doesn't.
+	for _, f := range s.Watch {
+		key.Watch = append(key.Watch, watchedPlace{f.Path, f.Kind})
+	}
 	if s.Preroll != "" {
 		// A new clip at the same path counts as a change. One that can't be
 		// read keeps its path, so it still differs from having none.

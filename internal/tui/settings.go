@@ -317,7 +317,8 @@ func (m *Model) openSettings(d *settingsDraft) tea.Cmd {
 		huh.NewText().Key("watch").
 			Title("Watched folders").
 			Description("Videos here or in subfolders that don't match the settings are queued. One per line (alt+enter).\n"+
-				"Start a line with movies: or shows: to name videos after their folders, as media servers lay them out.").
+				"Start a line with movies: or shows: to name videos after their folders, as media servers lay them out,\n"+
+				"and before that with a number such as +1 to run its videos before those of folders with a lower one.").
 			Lines(6).
 			Value(&d.watch).
 			Validate(func(text string) error {

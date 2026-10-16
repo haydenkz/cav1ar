@@ -86,9 +86,12 @@ restart queues the rest again straight away. Every finished job is kept
 there too, so the UI can say how much space has been saved over every run.
 
 Videos that arrive in a watched folder go ahead of the library already there,
-marked *up next*, so new downloads don't wait behind a long backlog. The job
-list is in the order jobs run: those that have started, then those up next,
-then the rest.
+marked *up next*, so new downloads don't wait behind a long backlog. A folder
+can also be given a priority by starting its line with a number, as in
+`+1 movies: /media/Movies`: its videos run before those of folders with a
+lower one (the default is 0), whether they've just arrived or not. The job
+list is in the order jobs run: those that have started, then the rest by
+priority, those up next first.
 
 Each job reads the original once, encoding the video and audio to one file
 and copying the subtitles and attachments to another on local disk, then
