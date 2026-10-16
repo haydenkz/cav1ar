@@ -36,6 +36,10 @@ var (
 	episodePattern = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(S(\d{1,2})[ ._-]*E(\d{1,3})((?:[ ._-]*-?[ ._-]*E\d{1,3})*))`)
 	extraEpisode   = regexp.MustCompile(`(?i)E(\d{1,3})`)
 	crossEpisode   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])((\d{1,2})x(\d{2,3}))(?:[^a-z0-9]|$)`) // 1x04
+	// seasonPattern matches the season of a season pack, as in
+	// "Show.S01.1080p": two digits, as scene names write it, so a title
+	// such as "Open Season 2" isn't cut short.
+	seasonPattern = regexp.MustCompile(`(?i)\bS\d{2}\b`)
 	// techPattern finds where a scene name's title ends and its technical
 	// details begin.
 	techPattern = regexp.MustCompile(`(?i)\b(\d{3,4}p|4k|uhd|hdr|bluray|blu-ray|bdrip|brrip|remux|web-?dl|webrip|web|hdtv|dvdrip|dvd|hdrip|x26[45]|h ?26[45]|hevc|avc|av1|xvid|aac|ac3|dts|repack|proper|extended|unrated|remastered)\b`)
@@ -77,6 +81,9 @@ func parseName(name string) release {
 	if tag, start := episodeTag(words); tag != "" {
 		r.Episode = tag
 		end = min(end, start)
+	}
+	if loc := seasonPattern.FindStringIndex(words); loc != nil {
+		end = min(end, loc[0])
 	}
 	// The year is the last one before the technical details, skipping one
 	// that starts the name, as in "1917.2019" or "2001.A.Space.Odyssey.1968".
