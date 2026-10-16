@@ -61,7 +61,7 @@ func main() {
 	flag.StringVar(&settings.OutDir, "out", saved.OutDir, "folder for encodes; empty saves next to each source")
 	flag.BoolVar(&settings.DeleteOriginal, "delete", saved.DeleteOriginal, "permanently delete each original once its result checks out")
 	flag.Func("watch", "keep a folder's videos encoded, including in subfolders (repeatable); "+
-		"prefix movies: or shows: to name them after their folders", func(v string) error {
+		"prefix movies: or shows: to name them after their folders, and a number such as +1 to run them first", func(v string) error {
 		f := encode.ParseWatchFolder(v)
 		abs, err := filepath.Abs(f.Path)
 		f.Path = abs

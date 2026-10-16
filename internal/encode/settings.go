@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -41,8 +42,9 @@ const (
 
 // WatchFolder is a folder whose videos are kept encoded.
 type WatchFolder struct {
-	Path string     `json:"path"`
-	Kind FolderKind `json:"kind,omitempty"`
+	Path     string     `json:"path"`
+	Kind     FolderKind `json:"kind,omitempty"`
+	Priority int        `json:"priority,omitempty"` // its videos run before those of folders with a lower one
 }
 
 // UnmarshalJSON also accepts a bare path, as older settings saved them.
@@ -56,22 +58,37 @@ func (f *WatchFolder) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*plain)(f))
 }
 
-// String is the folder as the settings form shows it, e.g. "shows: /tv".
+// String is the folder as the settings form shows it, e.g. "shows: /tv", or
+// "+1 movies: /films" with a priority.
 func (f WatchFolder) String() string {
-	if f.Kind == FolderAny {
-		return f.Path
+	s := f.Path
+	if f.Kind != FolderAny {
+		s = string(f.Kind) + ": " + s
 	}
-	return string(f.Kind) + ": " + f.Path
+	if f.Priority != 0 {
+		s = fmt.Sprintf("%+d %s", f.Priority, s)
+	}
+	return s
 }
+
+var priorityPrefix = regexp.MustCompile(`^([+-]\d+)\s+`)
 
 // ParseWatchFolder reads a folder written as String does.
 func ParseWatchFolder(s string) WatchFolder {
+	var f WatchFolder
+	s = strings.TrimSpace(s)
+	if m := priorityPrefix.FindStringSubmatch(s); m != nil {
+		f.Priority, _ = strconv.Atoi(m[1])
+		s = s[len(m[0]):]
+	}
+	f.Path = s
 	for _, kind := range []FolderKind{FolderMovies, FolderShows} {
 		if rest, ok := strings.CutPrefix(s, string(kind)+":"); ok {
-			return WatchFolder{Path: strings.TrimSpace(rest), Kind: kind}
+			f.Path, f.Kind = strings.TrimSpace(rest), kind
+			break
 		}
 	}
-	return WatchFolder{Path: strings.TrimSpace(s)}
+	return f
 }
 
 // Settings control how jobs are encoded. A job uses the settings in effect
@@ -203,6 +220,12 @@ func (s Settings) folderOf(path string) WatchFolder {
 		}
 	}
 	return best
+}
+
+// priorityOf is the priority of the watched folder path is in, or 0 for a
+// video in none.
+func (s Settings) priorityOf(path string) int {
+	return s.folderOf(path).Priority
 }
 
 // outputPath is where the encode of in is written.

@@ -1,9 +1,11 @@
 package encode
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -42,16 +44,18 @@ func NewQueue(ctx context.Context, s Settings) *Queue {
 }
 
 // Add queues an encode of in. Its output path is chosen when it starts.
+// Jobs run in order of the priority of the watched folder their video is
+// in, highest first.
 func (q *Queue) Add(in string) { q.add(in, false) }
 
-// AddNext queues an encode of in ahead of everything queued with Add, behind
-// anything queued with AddNext before it.
+// AddNext queues an encode of in ahead of everything of its priority queued
+// with Add, behind anything of its priority queued with AddNext before it.
 func (q *Queue) AddNext(in string) { q.add(in, true) }
 
 func (q *Queue) add(in string, next bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	j := &Job{ID: len(q.jobs), Input: in, State: Queued, Next: next}
+	j := &Job{ID: len(q.jobs), Input: in, State: Queued, Next: next, Priority: q.settings.priorityOf(in)}
 	if fi, err := os.Stat(in); err == nil {
 		j.InSize = fi.Size()
 	}
@@ -83,7 +87,7 @@ func (q *Queue) Retry(id int) {
 	if j == nil || (j.State != Failed && j.State != Canceled) {
 		return
 	}
-	*j = Job{ID: j.ID, Input: j.Input, InSize: j.InSize, State: Queued, Next: j.Next}
+	*j = Job{ID: j.ID, Input: j.Input, InSize: j.InSize, State: Queued, Next: j.Next, Priority: q.settings.priorityOf(j.Input)}
 	q.emitLocked(*j, "")
 	q.dispatchLocked()
 }
@@ -95,12 +99,19 @@ func (q *Queue) Settings() Settings {
 	return q.settings
 }
 
-// SetSettings changes the settings for jobs that have not started yet.
-// Running jobs keep the settings they started with.
+// SetSettings changes the settings for jobs that have not started yet,
+// including their priorities. Running jobs keep the settings they started
+// with.
 func (q *Queue) SetSettings(s Settings) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.settings = s
+	for _, j := range q.jobs {
+		if p := s.priorityOf(j.Input); j.State == Queued && j.Priority != p {
+			j.Priority = p
+			q.emitLocked(*j, "")
+		}
+	}
 	q.dispatchLocked()
 }
 
@@ -193,32 +204,39 @@ func (q *Queue) Close() {
 	q.wg.Wait()
 }
 
-// dispatchLocked starts queued jobs, oldest first, until the worker limit is
-// reached. The caller must hold q.mu.
+// dispatchLocked starts queued jobs in the order they run until the worker
+// limit is reached. The caller must hold q.mu.
 func (q *Queue) dispatchLocked() {
 	if q.paused || q.holding || q.closed || q.ctx.Err() != nil {
 		return
 	}
-	// Jobs queued with AddNext go first, then the rest, each in the order
-	// they were added.
-	for _, next := range []bool{true, false} {
-		for _, j := range q.jobs {
-			if q.running >= q.settings.Workers {
-				return
-			}
-			if j.State != Queued || j.Next != next {
-				continue
-			}
-			ctx, cancel := context.WithCancel(q.ctx)
-			q.cancels[j.ID] = cancel
-			q.running++
-			j.State = Running
-			j.Started = time.Now()
-			q.emitLocked(*j, "")
-			s := q.settings
-			q.wg.Go(func() { q.run(ctx, j, s) })
+	var waiting []*Job
+	for _, j := range q.jobs {
+		if j.State == Queued {
+			waiting = append(waiting, j)
 		}
 	}
+	slices.SortStableFunc(waiting, func(a, b *Job) int { return RunOrder(*a, *b) })
+	for _, j := range waiting {
+		if q.running >= q.settings.Workers {
+			return
+		}
+		ctx, cancel := context.WithCancel(q.ctx)
+		q.cancels[j.ID] = cancel
+		q.running++
+		j.State = Running
+		j.Started = time.Now()
+		q.emitLocked(*j, "")
+		s := q.settings
+		q.wg.Go(func() { q.run(ctx, j, s) })
+	}
+}
+
+// RunOrder compares two queued jobs by the order they run in: higher
+// priority first, then those queued with AddNext, then the order they were
+// added (which a stable sort keeps).
+func RunOrder(a, b Job) int {
+	return cmp.Or(cmp.Compare(b.Priority, a.Priority), cmp.Compare(b2i(b.Next), b2i(a.Next)))
 }
 
 func (q *Queue) run(ctx context.Context, j *Job, s Settings) {

@@ -383,13 +383,17 @@ func (m Model) order() []int {
 	}
 	slices.SortStableFunc(order, func(a, b int) int {
 		ja, jb := m.jobs[a], m.jobs[b]
-		return cmp.Or(cmp.Compare(place(ja), place(jb)), ja.Started.Compare(jb.Started))
+		if pa, pb := place(ja), place(jb); pa == 0 || pb == 0 {
+			return cmp.Or(cmp.Compare(pa, pb), ja.Started.Compare(jb.Started))
+		}
+		return encode.RunOrder(ja, jb) // both waiting
 	})
 	return order
 }
 
 // place is which part of the line j is in: 0 once it has started, 1 while
-// it waits up next, and 2 while it waits behind those.
+// it waits up next, and 2 while it waits behind those. Waiting jobs are put
+// in the order encode.RunOrder gives, which also weighs priority.
 func place(j encode.Job) int {
 	switch {
 	case !j.Started.IsZero():
