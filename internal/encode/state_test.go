@@ -2,8 +2,10 @@ package encode
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -101,5 +103,27 @@ func TestStateTotalsCountOnlyJobsThatRewroteAFile(t *testing.T) {
 	}
 	if saved != 110 || results != 2 {
 		t.Errorf("saved %d over %d results, want 110 over 2", saved, results)
+	}
+}
+
+// Trimming a long log drops ffmpeg's oldest lines and keeps cav1ar's, which
+// say what the job did.
+func TestTrimLogKeepsCav1arsLines(t *testing.T) {
+	lines := []string{"cav1ar: ▸ checking the file", "cav1ar: encode, because of: video h264", "cav1ar: ▸ encoding"}
+	for i := range 500 {
+		lines = append(lines, fmt.Sprintf("ffmpeg line %d", i))
+	}
+	lines = append(lines, "cav1ar: ▸ remuxing")
+	got := TrimLog(lines, 300)
+	if len(got) != 300 {
+		t.Fatalf("kept %d lines, want 300", len(got))
+	}
+	for _, want := range []string{"cav1ar: ▸ checking the file", "cav1ar: ▸ encoding", "cav1ar: ▸ remuxing", "ffmpeg line 499"} {
+		if !slices.Contains(got, want) {
+			t.Errorf("dropped %q", want)
+		}
+	}
+	if slices.Contains(got, "ffmpeg line 0") {
+		t.Error("kept the oldest of ffmpeg's lines")
 	}
 }

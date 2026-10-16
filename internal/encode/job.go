@@ -113,6 +113,28 @@ const (
 // whether it was one, rather than a line of ffmpeg's output.
 func Own(line string) (msg string, ok bool) { return strings.CutPrefix(line, ownPrefix) }
 
+// TrimLog shortens a job's log to at most max lines, dropping the oldest
+// lines of ffmpeg's output first and keeping cav1ar's own, which say what the
+// job did, unless they alone run past max.
+func TrimLog(lines []string, max int) []string {
+	over := len(lines) - max
+	if over <= 0 {
+		return lines
+	}
+	out := make([]string, 0, len(lines)-over)
+	for _, l := range lines {
+		if _, own := Own(l); !own && over > 0 {
+			over--
+			continue
+		}
+		out = append(out, l)
+	}
+	if len(out) > max {
+		out = out[len(out)-max:]
+	}
+	return out
+}
+
 // Stage returns the name of the stage a log line marks the start of, and
 // reports whether it marks one.
 func Stage(line string) (name string, ok bool) { return strings.CutPrefix(line, stagePrefix) }
