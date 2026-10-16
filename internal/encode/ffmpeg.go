@@ -231,9 +231,10 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 		}
 		return path, func() { release(); os.Remove(path) }, nil
 	}
-	run := func(args []string) error {
+	// rate is the frame rate of the video a pass writes, or 0 for none.
+	run := func(args []string, rate float64) error {
 		u.log("cav1ar: ffmpeg " + strings.Join(args, " "))
-		return runFFmpeg(ctx, args, p.info.Duration, u)
+		return runFFmpeg(ctx, args, p.info.Duration, rate, u)
 	}
 
 	av, done, err := intermediate()
@@ -258,7 +259,7 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 			stage += " again, decoding on the CPU"
 		}
 		u.stage(stage)
-		err = run(p.encodeArgs(av, side, hw))
+		err = run(p.encodeArgs(av, side, hw), frameRate(p.video))
 		if err == nil || ctx.Err() != nil || i == len(hwDecode)-1 {
 			break
 		}
@@ -287,7 +288,7 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 			defer done()
 			u.step("encoding the audio again")
 			u.stage("encoding the audio again, on its own")
-			if err := run(p.audioArgs(audio)); err != nil {
+			if err := run(p.audioArgs(audio), 0); err != nil {
 				return mediaInfo{}, err
 			}
 		}
@@ -295,7 +296,7 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 
 	u.step("remuxing")
 	u.stage("remuxing the passes together")
-	if err := run(p.remuxArgs(tmp, av, audio, side)); err != nil {
+	if err := run(p.remuxArgs(tmp, av, audio, side), frameRate(p.video)); err != nil {
 		return mediaInfo{}, err
 	}
 	u.step("")
@@ -307,8 +308,9 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 	return info, nil
 }
 
-// runFFmpeg runs ffmpeg, reporting its progress and output as it goes.
-func runFFmpeg(ctx context.Context, args []string, duration time.Duration, u updates) error {
+// runFFmpeg runs ffmpeg, reporting its progress and output as it goes. rate
+// is the frame rate of the video it writes, or 0 if it writes none.
+func runFFmpeg(ctx context.Context, args []string, duration time.Duration, rate float64, u updates) error {
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -336,7 +338,7 @@ func runFFmpeg(ctx context.Context, args []string, duration time.Duration, u upd
 			}
 		}
 	})
-	readProgress(stdout, duration, u.progress)
+	readProgress(stdout, duration, rate, u.progress)
 	wg.Wait()
 
 	if err := cmd.Wait(); err != nil {
@@ -480,9 +482,13 @@ func exists(path string) bool {
 }
 
 // readProgress parses ffmpeg's -progress output, a stream of key=value blocks
-// that each end with a "progress" key.
-func readProgress(r io.Reader, dur time.Duration, report func(progress)) {
+// that each end with a "progress" key. For a pass that writes video at rate
+// frames per second, how far along it is and how fast it goes come from the
+// frames written: out_time is as far as any stream has got, and audio, which
+// encodes far faster than video, gets to the end long before it.
+func readProgress(r io.Reader, dur time.Duration, rate float64, report func(progress)) {
 	p := progress{duration: dur}
+	frames := dur.Seconds() * rate // expected, or 0 if unknown
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		k, v, ok := strings.Cut(sc.Text(), "=")
@@ -491,14 +497,23 @@ func readProgress(r io.Reader, dur time.Duration, report func(progress)) {
 		}
 		v = strings.TrimSpace(v)
 		switch k {
+		case "frame":
+			if n, err := strconv.ParseFloat(v, 64); err == nil && frames > 0 {
+				p.done = min(max(n/frames, 0), 1)
+			}
 		case "fps":
 			p.fps, _ = strconv.ParseFloat(v, 64)
+			if rate > 0 {
+				p.speed = p.fps / rate
+			}
 		case "speed":
-			p.speed, _ = strconv.ParseFloat(strings.TrimSuffix(v, "x"), 64)
+			if rate == 0 {
+				p.speed, _ = strconv.ParseFloat(strings.TrimSuffix(v, "x"), 64)
+			}
 		case "total_size":
 			p.size, _ = strconv.ParseInt(v, 10, 64)
 		case "out_time_us":
-			if us, err := strconv.ParseInt(v, 10, 64); err == nil && dur > 0 {
+			if us, err := strconv.ParseInt(v, 10, 64); err == nil && dur > 0 && frames == 0 {
 				p.done = min(max(float64(us)/float64(dur.Microseconds()), 0), 1)
 			}
 		case "progress":

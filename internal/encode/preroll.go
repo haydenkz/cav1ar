@@ -369,7 +369,14 @@ func addPreroll(ctx context.Context, s Settings, main string, mainInfo mediaInfo
 	}
 	args = append(args, "-metadata", prerollTag+"="+id+" "+seconds6(length),
 		"-max_muxing_queue_size", "4096", "-f", "matroska", "-progress", "pipe:1", out)
-	if err := runFFmpeg(ctx, args, mainInfo.Duration+length, u); err != nil {
+	var rate float64
+	for _, st := range mainInfo.Streams {
+		if st.Type == "video" && !st.CoverArt {
+			rate = frameRate(st)
+			break
+		}
+	}
+	if err := runFFmpeg(ctx, args, mainInfo.Duration+length, rate, u); err != nil {
 		return 0, err
 	}
 	return length, nil

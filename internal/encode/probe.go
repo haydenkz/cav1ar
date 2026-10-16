@@ -171,6 +171,12 @@ func probe(ctx context.Context, in string) (mediaInfo, error) {
 }
 
 // ratio reads a frame rate such as "24000/1001".
+// frameRate is st's frame rate, or 0 if it doesn't say.
+func frameRate(st streamInfo) float64 {
+	fps, _ := ratio(st.FrameRate)
+	return fps
+}
+
 func ratio(s string) (float64, bool) {
 	num, den, ok := strings.Cut(s, "/")
 	n, err1 := strconv.ParseFloat(num, 64)
