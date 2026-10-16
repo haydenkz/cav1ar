@@ -305,6 +305,9 @@ func (m Model) jobRow(j encode.Job, selected bool, c columns) string {
 		case encode.ActionRename:
 			bar, pct = m.st.okText.Render(cell("renamed", c.bar)), ""
 			info = ""
+		case encode.ActionRetag:
+			bar, pct = m.st.okText.Render(cell("tags fixed", c.bar)), ""
+			info = ""
 		}
 		if j.Note != "" {
 			info = m.st.warnText.Render(cell(j.Note+", see log", c.info))
@@ -338,6 +341,8 @@ func working(j encode.Job) string {
 		return "remuxing…"
 	case encode.ActionEncode:
 		return "encoding…"
+	case encode.ActionRetag:
+		return "fixing tags…"
 	}
 	return "checking…"
 }
@@ -350,6 +355,8 @@ func actionName(a encode.Action) string {
 		return "remux"
 	case encode.ActionEncode:
 		return "encode"
+	case encode.ActionRetag:
+		return "retag"
 	}
 	return ""
 }

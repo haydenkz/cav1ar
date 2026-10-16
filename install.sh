@@ -104,6 +104,9 @@ else
 	echo "$encoders" | grep -q libsvtav1 || warn "this ffmpeg has no SVT-AV1 (libsvtav1); CPU encoding won't work"
 	echo "$encoders" | grep -q libopus || warn "this ffmpeg has no Opus (libopus); only copying audio will work"
 fi
+if ! has mkvpropedit || ! has mkvextract; then
+	say "optional: install MKVToolNix (mkvpropedit, mkvextract) to fix tags without rewriting files"
+fi
 
 mkdir -p "$BIN_DIR"
 if [ -f "$script_dir/go.mod" ] && grep -q "module github.com/$REPO" "$script_dir/go.mod"; then

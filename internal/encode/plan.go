@@ -19,6 +19,7 @@ type Action string
 const (
 	ActionNone   Action = "none"   // nothing: it already matches
 	ActionRename Action = "rename" // only its name is wrong
+	ActionRetag  Action = "retag"  // only its tags, track titles, flags or chapters are wrong; fixed in place
 	ActionRemux  Action = "remux"  // tracks to drop, audio to encode or tags to fix; the video is copied
 	ActionEncode Action = "encode" // the video is encoded
 )
@@ -435,7 +436,7 @@ func (p *plan) reasons() []string {
 		add("subtitles to check")
 	}
 	if slices.ContainsFunc(p.subs, func(sub subOut) bool { return sub.forced != sub.Forced || sub.sdh != sub.HearingImpaired }) {
-		add("subtitle flags")
+		add(reasonSubFlags)
 	}
 
 	// Streams left out.
@@ -480,12 +481,35 @@ func (p *plan) reasons() []string {
 		add("replace preroll")
 	}
 	if p.tagsDiffer() {
-		add("tags")
+		add(reasonTags)
 	}
 	if s.StripMetadata && p.info.Chapters > 0 {
-		add("chapters")
+		add(reasonChapters)
 	}
 	return out
+}
+
+// Reasons that only concern a file's metadata, which a retag fixes without
+// rewriting the file.
+const (
+	reasonSubFlags = "subtitle flags"
+	reasonTags     = "tags"
+	reasonChapters = "chapters"
+)
+
+// retaggable reports whether the file can be brought into line by editing
+// its metadata in place: it's Matroska, everything wrong with it is
+// metadata, MKVToolNix is installed, and the settings let the original be
+// changed rather than kept beside a copy.
+func (p *plan) retaggable() bool {
+	if !p.settings.DeleteOriginal || filepath.Dir(p.out) != filepath.Dir(p.in) ||
+		!strings.EqualFold(filepath.Ext(p.in), ".mkv") || !haveMKVToolNix() {
+		return false
+	}
+	reasons := p.reasons()
+	return len(reasons) > 0 && !slices.ContainsFunc(reasons, func(r string) bool {
+		return r != reasonSubFlags && r != reasonTags && r != reasonChapters
+	})
 }
 
 // tagsDiffer reports whether the file's titles, languages or other tags
@@ -523,6 +547,8 @@ func (p *plan) action() Action {
 	switch {
 	case p.encodeVideo:
 		return ActionEncode
+	case p.retaggable():
+		return ActionRetag
 	case len(p.reasons()) > 0:
 		return ActionRemux
 	case p.out == p.in:
