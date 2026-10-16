@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/filepicker"
@@ -12,6 +11,14 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/haydenkz/cav1ar/internal/encode"
+)
+
+// pickMode is what the file browser is open for.
+type pickMode int
+
+const (
+	pickAdd   pickMode = iota // queuing files
+	pickWatch                 // choosing a folder to watch, for the settings
 )
 
 func newPicker() filepicker.Model {
@@ -29,29 +36,44 @@ func newPicker() filepicker.Model {
 	return p
 }
 
+// openPicker shows the file browser for mode.
+func (m *Model) openPicker(mode pickMode) {
+	m.pick = mode
+	m.screen = screenAdd
+}
+
 func (m *Model) updatePicker(msg tea.Msg) tea.Cmd {
 	if k, ok := msg.(tea.KeyPressMsg); ok {
 		switch {
 		case key.Matches(k, m.keys.Back):
-			m.screen = screenQueue
+			if m.pick == pickWatch {
+				m.screen = screenSettings
+			} else {
+				m.screen = screenQueue
+			}
 			return nil
-		case key.Matches(k, m.keys.AddItem):
-			return m.addPath(m.picker.HighlightedPath())
-		case key.Matches(k, m.keys.AddAll):
-			return m.addPath(m.picker.CurrentDirectory)
-		case key.Matches(k, m.keys.Watch):
+		case m.pick == pickWatch && key.Matches(k, m.keys.WatchHere):
 			dir := m.picker.CurrentDirectory
 			if p := m.picker.HighlightedPath(); p != "" {
 				if fi, err := os.Stat(p); err == nil && fi.IsDir() {
 					dir = p
 				}
 			}
-			return m.toggleWatch(dir)
+			m.watchFolder(dir)
+			m.screen = screenSettings
+			return m.setStatus("Watching "+shortPath(dir)+" once you save. Press t to name videos as movies or shows.", false)
+		case m.pick == pickAdd && key.Matches(k, m.keys.AddItem):
+			return m.addPath(m.picker.HighlightedPath())
+		case m.pick == pickAdd && key.Matches(k, m.keys.AddAll):
+			return m.addPath(m.picker.CurrentDirectory)
 		}
 	}
 
 	var cmd tea.Cmd
 	m.picker, cmd = m.picker.Update(msg)
+	if m.pick != pickAdd {
+		return cmd
+	}
 	if ok, path := m.picker.DidSelectFile(msg); ok {
 		return tea.Batch(cmd, m.addFiles(path))
 	}
@@ -110,36 +132,6 @@ func (m *Model) addFiles(paths ...string) tea.Cmd {
 		return m.setStatus("Added "+added[0], false)
 	}
 	return m.setStatus(fmt.Sprintf("Added %d files", len(added)), false)
-}
-
-// toggleWatch moves dir through not watched, watched, watched as movies and
-// watched as shows, and round again.
-func (m *Model) toggleWatch(dir string) tea.Cmd {
-	s := m.settings
-	s.Watch = slices.Clone(s.Watch)
-	i := slices.IndexFunc(s.Watch, func(f encode.WatchFolder) bool { return f.Path == dir })
-	var msg string
-	switch {
-	case i < 0:
-		s.Watch = append(s.Watch, encode.WatchFolder{Path: dir})
-		msg = "Watching " + filepath.Base(dir) + " and its subfolders. Press w again to name videos after movie folders."
-		if !s.WatchExisting {
-			msg += " Videos already there are left alone; press a to add them."
-		}
-	case s.Watch[i].Kind == encode.FolderAny:
-		s.Watch[i].Kind = encode.FolderMovies
-		msg = "Watching " + filepath.Base(dir) + " as movies, named after their folders. Press w again for shows."
-	case s.Watch[i].Kind == encode.FolderMovies:
-		s.Watch[i].Kind = encode.FolderShows
-		msg = "Watching " + filepath.Base(dir) + " as shows, named after their show folders. Press w again to stop."
-	default:
-		s.Watch = slices.Delete(s.Watch, i, i+1)
-		msg = "Stopped watching " + filepath.Base(dir)
-	}
-	if err := m.saveSettings(s); err != nil {
-		return m.setStatus("Couldn't save the watch list: "+err.Error(), true)
-	}
-	return m.setStatus(msg, false)
 }
 
 // shortPath abbreviates the home directory to ~.

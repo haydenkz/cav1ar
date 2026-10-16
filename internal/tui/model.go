@@ -83,7 +83,7 @@ type Model struct {
 	placed   bool // the cursor has been put on the daemon's current job
 
 	jobs     []encode.Job // indexed by job ID
-	logs     [][]string   // indexed by job ID
+	logs     [][]logEntry // indexed by job ID
 	cursor   int          // selected job
 	offset   int          // first job row in view
 	hideDone bool         // leave finished jobs out of the list, apart from failed ones
@@ -98,9 +98,17 @@ type Model struct {
 	bar    progress.Model
 	log    viewport.Model
 	picker filepicker.Model
-	form   *huh.Form      // set while the settings screen is open
-	draft  *settingsDraft // values the form edits
+	pick   pickMode // what the file browser is open for
 
+	// Settings screen.
+	draft          *settingsDraft // values being edited, until saved
+	section        int            // the section open, kept for the next visit
+	form           *huh.Form      // the open section's fields, unless it is the folders list
+	shownFor       string         // the draft values the form's fields were chosen for
+	folderRow      int            // selected row of the folders list
+	confirmDiscard bool           // esc was pressed with unsaved changes
+
+	fullLog     bool // show all of the selected job's output, not just its steps
 	follow      bool // keep the log scrolled to the bottom
 	logDirty    bool // the selected job's log needs re-rendering
 	confirmQuit bool
@@ -191,7 +199,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	m.layout()
 	if m.logDirty && m.cursor < len(m.logs) {
-		m.log.SetContentLines(m.logs[m.cursor])
+		m.log.SetContentLines(m.logLines(m.cursor))
 		m.logDirty = false
 	}
 	if m.follow {
@@ -222,6 +230,14 @@ func (m *Model) queueKey(msg tea.KeyPressMsg) tea.Cmd {
 		} else {
 			m.keys.HideDone.SetHelp("h", "hide done")
 		}
+	case key.Matches(msg, m.keys.FullLog):
+		m.fullLog = !m.fullLog
+		m.logDirty, m.follow = true, true
+		if m.fullLog {
+			m.keys.FullLog.SetHelp("enter", "steps only")
+		} else {
+			m.keys.FullLog.SetHelp("enter", "full log")
+		}
 	case key.Matches(msg, m.keys.LogUp):
 		m.log.PageUp()
 		m.follow = m.log.AtBottom()
@@ -237,10 +253,10 @@ func (m *Model) queueKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.queue.Retry(m.jobs[m.cursor].ID)
 		}
 	case key.Matches(msg, m.keys.Add):
-		m.screen = screenAdd
+		m.openPicker(pickAdd)
 		return m.picker.Init()
 	case key.Matches(msg, m.keys.Settings):
-		return m.openSettings(newDraft(m.settings))
+		return m.openSettings(newDraft(m.settings), m.section)
 	case key.Matches(msg, m.keys.Pause):
 		m.holding = !m.holding
 		m.queue.SetHolding(m.holding)
@@ -285,7 +301,7 @@ func (m *Model) apply(evs []encode.Event) {
 				m.logDirty = m.logDirty || id == m.cursor
 			}
 			if m.jobs[id].State != encode.Failed && ev.Job.State == encode.Failed {
-				m.appendLog(id, m.st.badText.Render("✗ "+ev.Job.Err.Error()))
+				m.appendLog(id, logEntry{m.st.badText.Render("✗ " + ev.Job.Err.Error()), true})
 			}
 			m.jobs[id] = ev.Job
 		}
@@ -312,23 +328,42 @@ func (m *Model) placeCursor() {
 	m.selectJob(last)
 }
 
+// logEntry is a line of a job's log, styled, and whether cav1ar wrote it
+// rather than ffmpeg. The steps view shows only cav1ar's.
+type logEntry struct {
+	text string
+	own  bool
+}
+
 // logLine styles a line of a job's log so that cav1ar's own lines stand out
 // from ffmpeg's output, and the start of each stage most of all.
-func (m *Model) logLine(line string) string {
+func (m *Model) logLine(line string) logEntry {
 	line = strings.ReplaceAll(line, "\t", "    ")
 	if stage, ok := encode.Stage(line); ok {
-		return m.st.paneTitle.Render("▸ " + stage)
+		return logEntry{m.st.paneTitle.Render("▸ " + stage), true}
 	}
 	if msg, ok := encode.Own(line); ok {
 		if cmd, ok := strings.CutPrefix(msg, "ffmpeg "); ok {
-			return m.st.dim.Render("$ ffmpeg " + cmd)
+			return logEntry{m.st.dim.Render("$ ffmpeg " + cmd), false}
 		}
-		return msg
+		return logEntry{"  " + msg, true}
 	}
-	return m.st.dim.Render(line)
+	return logEntry{m.st.dim.Render(line), false}
 }
 
-func (m *Model) appendLog(id int, line string) {
+// logLines are the lines of job id's log to show: all of them in the full
+// log, or only cav1ar's.
+func (m Model) logLines(id int) []string {
+	var lines []string
+	for _, e := range m.logs[id] {
+		if m.fullLog || e.own {
+			lines = append(lines, e.text)
+		}
+	}
+	return lines
+}
+
+func (m *Model) appendLog(id int, line logEntry) {
 	lines := append(m.logs[id], line)
 	if len(lines) > maxLogLines {
 		lines = lines[len(lines)-maxLogLines:]
@@ -352,7 +387,7 @@ func (m *Model) setPauseHelp() {
 	if m.holding {
 		m.keys.Pause.SetHelp("p", "carry on")
 	} else {
-		m.keys.Pause.SetHelp("p", "pause after these")
+		m.keys.Pause.SetHelp("p", "pause")
 	}
 	if m.paused {
 		m.keys.PauseNow.SetHelp("P", "resume")
@@ -433,8 +468,14 @@ func (m *Model) layout() {
 	m.help.SetWidth(m.width - 2)
 	avail := m.bodyHeight()
 
+	// The queue gets the room, and the log what's left: a few lines of
+	// steps, or most of the screen for the full log.
 	shown := m.rows()
-	m.jobsH = max(min(len(shown)+2, avail/2), 3)
+	minLog := 7
+	if m.fullLog {
+		minLog = avail * 3 / 5
+	}
+	m.jobsH = max(min(len(shown)+2, avail-minLog), 3)
 	m.logH = max(avail-m.jobsH, 3)
 	m.log.SetWidth(m.width - 4)
 	m.log.SetHeight(m.logH - 2)

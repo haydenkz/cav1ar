@@ -123,6 +123,15 @@ func (s styles) box(title, body string, w, h int) string {
 		s.pane.Width(w).Height(h-1).MaxHeight(h-1).Render(body))
 }
 
+// cellLeft fits s into exactly w cells like cell, but drops the start rather
+// than the end, keeping the end of a path, which names it.
+func cellLeft(s string, w int) string {
+	if over := lipgloss.Width(s) - w; over > 0 {
+		s = "…" + ansi.TruncateLeft(s, over+1, "")
+	}
+	return cell(s, w)
+}
+
 // cell fits s into exactly w cells, truncating with an ellipsis or padding.
 func cell(s string, w int) string {
 	s = ansi.Truncate(s, w, "…")

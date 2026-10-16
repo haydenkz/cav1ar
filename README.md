@@ -47,10 +47,16 @@ it shows what the daemon is doing, and adding, pausing, canceling and
 retrying act on the daemon's jobs, which carry on once the UI closes. Pass
 `-local` for a queue of the UI's own instead.
 
-In the UI, press `a` to add files, `s` for settings, `p` to pause once the
-running jobs finish (`P` pauses them where they are), `h` to hide finished
-jobs, and `?` for all keys. In the file browser, `w` watches a folder; press it again to watch
-it as movies or shows.
+In the UI, the queue takes most of the screen, with the steps of the
+selected job below it: press `enter` for its full ffmpeg output. Press `a` to
+add files, `s` for settings, `p` to pause once the running jobs finish (`P`
+pauses them where they are), and `?` for all keys.
+
+Settings are in sections: `tab` moves between them, `↑`/`↓` between fields
+and `←`/`→` changes a choice, with what the field does shown underneath.
+`ctrl+s` saves; `esc` closes, asking first if there are changes. Watched
+folders are under **Folders**: `a` adds one from a folder browser, `t` names
+its videos as movies or shows, `+`/`-` set its priority, and `d` removes it.
 
 Settings are saved to `~/.config/cav1ar/config.json`. A running daemon picks
 up changes made in the UI.
@@ -87,11 +93,11 @@ there too, so the UI can say how much space has been saved over every run.
 
 Videos that arrive in a watched folder go ahead of the library already there,
 marked *up next*, so new downloads don't wait behind a long backlog. A folder
-can also be given a priority by starting its line with a number, as in
-`+1 movies: /media/Movies`: its videos run before those of folders with a
-lower one (the default is 0), whether they've just arrived or not. The job
-list is in the order jobs run: those that have started, then the rest by
-priority, those up next first.
+can also be given a priority, under **Folders** in the settings, or as a
+number before it in `-watch`, as in `+1 movies: /media/Movies`: its videos
+run before those of folders with a lower one (the default is 0), whether
+they've just arrived or not. The job list is in the order jobs run: those
+that have started, then the rest by priority, those up next first.
 
 Each job reads the original once, encoding the video and audio to one file
 and copying the subtitles and attachments to another on local disk, then
