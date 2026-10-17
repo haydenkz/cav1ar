@@ -31,7 +31,7 @@ func listenForWorkers(s encode.Settings, q *encode.Queue) (*worker.Server, error
 
 // runWorker lends this machine's devices to the daemon at addr until it is
 // stopped.
-func runWorker(addr, name, allow string) error {
+func runWorker(addr, name, allow string, paths []worker.PathMap) error {
 	if toJournal() {
 		log.SetFlags(0) // the journal adds its own timestamps
 	}
@@ -56,7 +56,10 @@ func runWorker(addr, name, allow string) error {
 	for _, d := range devices {
 		log.Printf("cav1ar: lending %s (%s)", d.Name, d.ID)
 	}
+	for _, m := range paths {
+		log.Printf("cav1ar: the daemon's %s is %s here", m.From, m.To)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	return worker.Work(ctx, worker.Options{Addr: addr, Token: token, Name: name, Allow: dirs, Devices: devices, Log: log.Printf})
+	return worker.Work(ctx, worker.Options{Addr: addr, Token: token, Name: name, Allow: dirs, Paths: paths, Devices: devices, Log: log.Printf})
 }

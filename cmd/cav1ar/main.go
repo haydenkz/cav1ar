@@ -19,6 +19,7 @@ import (
 	"github.com/haydenkz/cav1ar/internal/encode"
 	"github.com/haydenkz/cav1ar/internal/remote"
 	"github.com/haydenkz/cav1ar/internal/tui"
+	"github.com/haydenkz/cav1ar/internal/worker"
 )
 
 // version is set by release builds.
@@ -58,7 +59,14 @@ func main() {
 		"instead of encoding for itself; it connects with the daemon's worker token")
 	host, _ := os.Hostname()
 	workerName := flag.String("worker-name", host, "with -worker: the name the daemon knows this worker by")
-	allow := flag.String("allow", "", "with -worker: the folders the daemon's passes may use, comma-separated; empty allows any")
+	allow := flag.String("allow", "", "with -worker: the folders the daemon's passes may use, comma-separated, as this worker sees them; empty allows any")
+	var paths []worker.PathMap
+	flag.Func("map", "with -worker: where a folder the daemon sees is on this worker, as daemon-path=worker-path, "+
+		"for when they aren't at the same paths (repeatable)", func(v string) error {
+		m, err := worker.ParsePathMap(v)
+		paths = append(paths, m)
+		return err
+	})
 	ffmpeg := flag.String("ffmpeg", encode.FFmpeg, "with -worker: the ffmpeg to encode with")
 	flag.IntVar(&settings.CRF, "crf", saved.CRF, "quality, 1–63; lower is better quality and bigger files, about the same on every encoder")
 	flag.IntVar(&settings.Preset, "preset", saved.Preset, "CPU speed, 0 (slowest, smallest files) to 13 (fastest)")
@@ -108,7 +116,7 @@ func main() {
 	}
 	if *workFor != "" {
 		encode.FFmpeg = *ffmpeg
-		if err := runWorker(*workFor, *workerName, *allow); err != nil {
+		if err := runWorker(*workFor, *workerName, *allow, paths); err != nil {
 			fail(1, "%v", err)
 		}
 		return

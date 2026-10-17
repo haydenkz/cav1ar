@@ -84,8 +84,8 @@ device encoded it.
 
 A daemon can also encode on other machines' GPUs, or a container's: workers.
 The daemon keeps the queue and does everything but the encode itself, which
-runs on the worker. Both must see the media at the same paths, and share a
-folder for the files the worker writes. In the daemon's
+runs on the worker. Both must see the media, at the same paths or mapped
+ones, and share a folder for the files the worker writes. In the daemon's
 `~/.config/cav1ar/config.json`:
 
 ```json
@@ -102,11 +102,15 @@ cav1ar -worker daemon-host:7310 -allow /media
 ```
 
 The worker's GPUs then show up alongside the daemon's, with the worker's
-name after theirs, and take jobs the same way. `-allow` keeps the daemon's passes to the
-folders given, `-worker-name` names the worker, and `-ffmpeg` picks the
-ffmpeg it runs. Each time a worker connects, the daemon checks it sees the
-shared folder; a job whose worker goes away goes back in the queue. The token
-is all that keeps others out, so only open the port to a network you trust.
+name after theirs, and take jobs the same way. `-worker-name` names the
+worker, and `-ffmpeg` picks the ffmpeg it runs. A worker that sees the files
+at other paths, such as a NAS mounted elsewhere, maps each folder with
+`-map daemon-path=worker-path`, as in `-map /mnt/media=/media/nas`. `-allow`
+keeps the daemon's passes to the folders given, as the worker sees them.
+
+Each time a worker connects, the daemon checks it sees the shared folder; a
+job whose worker goes away goes back in the queue. The token is all that
+keeps others out, so only open the port to a network you trust.
 
 ## File names
 
