@@ -90,17 +90,6 @@ func TestAPrerollIsLeftOffAudioItCantMatch(t *testing.T) {
 	}
 }
 
-func TestFFprobeGoesWithFFmpeg(t *testing.T) {
-	old := FFmpeg
-	defer func() { FFmpeg = old }()
-	for ff, want := range map[string]string{"ffmpeg": "ffprobe", "/opt/ffmpeg/bin/ffmpeg": "/opt/ffmpeg/bin/ffprobe"} {
-		FFmpeg = ff
-		if got := ffprobePath(); got != want {
-			t.Errorf("with %s, got %s, want %s", ff, got, want)
-		}
-	}
-}
-
 // builtRunner is a worker whose ffmpeg is the build given.
 type builtRunner string
 

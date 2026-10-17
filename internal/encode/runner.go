@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,15 +19,6 @@ import (
 
 // FFmpeg is the ffmpeg cav1ar runs to test devices and encode.
 var FFmpeg = "ffmpeg"
-
-// ffprobePath is the ffprobe that goes with FFmpeg: the one beside it, when
-// FFmpeg is a path, or else whichever is on the PATH.
-func ffprobePath() string {
-	if strings.ContainsRune(FFmpeg, filepath.Separator) {
-		return filepath.Join(filepath.Dir(FFmpeg), "ffprobe")
-	}
-	return "ffprobe"
-}
 
 // ffmpegBuilds holds what FFmpegBuild found for each ffmpeg.
 var ffmpegBuilds sync.Map
@@ -118,12 +108,12 @@ func runRemote(ctx context.Context, r Runner, args []string, duration time.Durat
 		io.Copy(io.Discard, pr) // in case it stopped early
 		close(read)
 	}()
-	var last string // last stderr line, which is usually the reason for a failure
+	var why ffmpegFailure // picks the cause of a failure out of ffmpeg's output, as runFFmpeg does
 	err := r.Run(ctx, args, Output{
 		Stdout: func(line string) { io.WriteString(pw, line+"\n") },
 		Stderr: func(line string) {
 			if line = strings.TrimRight(line, " \r"); line != "" {
-				last = strings.TrimSpace(line)
+				why.add(line)
 				u.log(line)
 			}
 		},
@@ -134,8 +124,8 @@ func runRemote(ctx context.Context, r Runner, args []string, duration time.Durat
 	switch {
 	case err == nil || errors.Is(err, ErrWorkerGone) || ctx.Err() != nil:
 		return err
-	case last != "":
-		return errors.New(last)
+	case why.reason() != "":
+		return errors.New(why.reason())
 	}
 	return err
 }

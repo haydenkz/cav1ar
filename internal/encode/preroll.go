@@ -82,7 +82,7 @@ func workDir() (string, error) {
 // for audio priming.
 func joinPoint(ctx context.Context, path string, length time.Duration) (time.Duration, error) {
 	// Read from the start: seeking would land on the preroll's only keyframe.
-	out, err := exec.CommandContext(ctx, ffprobePath(), "-v", "error", "-select_streams", "v:0",
+	out, err := exec.CommandContext(ctx, FFprobe(), "-v", "error", "-select_streams", "v:0",
 		"-read_intervals", "%"+seconds6(length+3*time.Second), "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", path).Output()
 	if err != nil {
 		return 0, fmt.Errorf("finding the end of the preroll: %w", err)
@@ -501,7 +501,7 @@ func seconds6(d time.Duration) string { return strconv.FormatFloat(d.Seconds(), 
 // av1Config reads the AV1 codec configuration (av1C) of a file's video,
 // which holds its sequence header.
 func av1Config(ctx context.Context, path string) ([]byte, error) {
-	out, err := exec.CommandContext(ctx, ffprobePath(), "-v", "error", "-select_streams", "v:0",
+	out, err := exec.CommandContext(ctx, FFprobe(), "-v", "error", "-select_streams", "v:0",
 		"-show_streams", "-show_data", path).Output()
 	if err != nil {
 		return nil, fmt.Errorf("reading the AV1 header: %w", err)
@@ -643,7 +643,7 @@ func joinDecodes(ctx context.Context, joined string, length time.Duration) error
 func seamFits(ctx context.Context, pre, main string, length time.Duration) error {
 	packets := func(path string, intervals ...string) ([]string, error) {
 		args := append([]string{"-v", "error", "-select_streams", "v:0"}, intervals...)
-		out, err := exec.CommandContext(ctx, ffprobePath(), append(args,
+		out, err := exec.CommandContext(ctx, FFprobe(), append(args,
 			"-show_entries", "packet=dts_time,pts_time,duration_time", "-of", "csv=p=0", path)...).Output()
 		if err != nil {
 			return nil, err
