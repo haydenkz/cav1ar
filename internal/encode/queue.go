@@ -315,23 +315,38 @@ func (q *Queue) run(ctx context.Context, j *Job, s Settings, d Device) {
 		step: func(step string) { update("", func() { j.Step = step }) },
 	})
 
+	// The result's size, looked up before taking the lock, which a hung
+	// network mount would otherwise hold up.
+	var outSize int64
+	if err == nil {
+		q.mu.Lock()
+		out := j.Output
+		q.mu.Unlock()
+		if fi, err := os.Stat(out); err == nil {
+			outSize = fi.Size()
+		}
+	}
+
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	j.Finished = time.Now()
 	switch {
+	case err == nil:
+		// Done, even if canceled just now: once the result is in place,
+		// encodeFile doesn't stop for a cancel, and returns nil only when
+		// it's done.
+		j.State, j.Progress = Done, 1
+		if outSize > 0 {
+			j.OutSize = outSize
+		}
 	case errors.Is(err, ErrWorkerGone) && ctx.Err() == nil:
 		// It starts over on whichever device has room next.
 		*j = Job{ID: j.ID, Input: j.Input, InSize: j.InSize, State: Queued, Next: j.Next, Priority: j.Priority}
 		q.emitLocked(*j, "cav1ar: "+err.Error()+" partway through, so it waits for another device")
 	case ctx.Err() != nil || errors.Is(err, context.Canceled):
 		j.State = Canceled
-	case err != nil:
-		j.State, j.Err = Failed, err
 	default:
-		j.State, j.Progress = Done, 1
-		if fi, err := os.Stat(j.Output); err == nil {
-			j.OutSize = fi.Size()
-		}
+		j.State, j.Err = Failed, err
 	}
 	q.cancels[j.ID]() // release the context only after checking whether it was canceled
 	delete(q.cancels, j.ID)
