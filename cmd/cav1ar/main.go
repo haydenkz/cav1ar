@@ -186,6 +186,7 @@ func main() {
 	}
 	cancel()
 	q.Close()
+	w.Wait() // so the last jobs are in the history before cav1ar exits
 	if !*daemon {
 		printSummary(q.Jobs())
 	}

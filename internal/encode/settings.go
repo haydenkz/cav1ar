@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -199,7 +200,7 @@ func (s Settings) Validate() error {
 	case s.AudioCodec != Opus && s.AudioCodec != AAC:
 		return fmt.Errorf("unknown audio codec %q", s.AudioCodec)
 	case s.AudioKbps < AudioAuto:
-		return fmt.Errorf("audio bitrate must be positive, or %d for auto, not %d", AudioAuto, s.AudioKbps)
+		return fmt.Errorf("audio bitrate must be positive, %d to copy the audio or %d for auto, not %d", AudioCopy, AudioAuto, s.AudioKbps)
 	case s.Downmix && s.AudioKbps == AudioCopy:
 		return errors.New("downmixing needs encoded audio, since copied audio can't be changed")
 	case s.AudioTracks != KeepAll && s.AudioTracks != KeepLanguage && s.AudioTracks != KeepBest:
@@ -214,13 +215,32 @@ func (s Settings) Validate() error {
 		return fmt.Errorf("the workers' folder must be a full path, not %q", s.WorkerDir)
 	case s.WorkerListen != "" && s.WorkerDir == "":
 		return errors.New("taking workers needs a folder the daemon and its workers share (worker_dir)")
+	case s.WebListen != "" && !validListen(s.WebListen):
+		return fmt.Errorf("the web UI's address must be a port, optionally after a host, like :6767 or 127.0.0.1:6767, or empty for none, not %q", s.WebListen)
 	}
+	watched := map[string]bool{}
 	for _, f := range s.Watch {
-		if f.Kind != FolderAny && f.Kind != FolderMovies && f.Kind != FolderShows {
+		switch {
+		case !filepath.IsAbs(f.Path):
+			return fmt.Errorf("a watched folder must be a full path, not %q", f.Path)
+		case filepath.Clean(f.Path) != f.Path:
+			return fmt.Errorf("%s: write the folder as %s", f.Path, filepath.Clean(f.Path))
+		case watched[f.Path]:
+			return fmt.Errorf("%s is watched twice", f.Path)
+		case f.Kind != FolderAny && f.Kind != FolderMovies && f.Kind != FolderShows:
 			return fmt.Errorf("%s: unknown folder kind %q", f.Path, f.Kind)
 		}
+		watched[f.Path] = true
 	}
 	return nil
+}
+
+// validListen reports whether addr is an address to listen on: a port from
+// 1 to 65535, after a host or an empty one.
+func validListen(addr string) bool {
+	_, port, err := net.SplitHostPort(addr)
+	n, nerr := strconv.Atoi(port)
+	return err == nil && nerr == nil && n >= 1 && n <= 65535
 }
 
 // MaxSlots is the most files a device can be set to encode at once.
