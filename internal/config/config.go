@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/haydenkz/cav1ar/internal/encode"
 )
@@ -35,7 +36,7 @@ func WorkerToken(create bool) (token, path string, err error) {
 		return "", path, fmt.Errorf("no worker token at %s; copy the daemon's there, or set CAV1AR_WORKER_TOKEN", path)
 	}
 	token = rand.Text()
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", path, err
 	}
 	return token, path, os.WriteFile(path, []byte(token+"\n"), 0o600)
@@ -96,7 +97,8 @@ func migrate(s *encode.Settings, data []byte) {
 	}
 }
 
-// Save writes settings so the next run starts with them.
+// Save writes settings so the next run starts with them. Only their owner
+// can read them, since they hold the web UI's password.
 func Save(s encode.Settings) error {
 	path, err := Path()
 	if err != nil {
@@ -106,13 +108,40 @@ func Save(s encode.Settings) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// Write then rename, so a crash never leaves a half-written file.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append(data, '\n'), 0o644); err != nil {
+	// Write a new file, which only its owner can read, then rename it over
+	// the old one, so a crash never leaves a half-written file.
+	f, err := os.CreateTemp(dir, "config.json.*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	keepOwner(f, path)
+	_, err = f.Write(append(data, '\n'))
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(f.Name(), path)
+	}
+	if err != nil {
+		os.Remove(f.Name())
+	}
+	return err
+}
+
+// keepOwner gives f the owner of the file at path, if it has another, so
+// that root saving the settings of a daemon run as someone else, as in a
+// container, doesn't leave the daemon a file it can't read.
+func keepOwner(f *os.File, path string) {
+	if fi, err := os.Stat(path); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+			f.Chown(int(st.Uid), int(st.Gid)) // only root can, and only root needs to
+		}
+	}
 }

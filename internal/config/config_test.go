@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"maps"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/haydenkz/cav1ar/internal/encode"
@@ -28,5 +30,35 @@ func TestOldEncoderSettingsCarryOver(t *testing.T) {
 		if !maps.Equal(s.Encoders, c.want) {
 			t.Errorf("%s: got %v, want %v", c.saved, s.Encoders, c.want)
 		}
+	}
+}
+
+// The settings hold the web UI's password, so only their owner can read
+// them, and saving them over old ones leaves nothing else behind.
+func TestSettingsAreTheOwnersAlone(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	s := encode.DefaultSettings()
+	s.WebPassword = "hash"
+	for range 2 {
+		if err := Save(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path, err := Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]os.FileMode{path: 0o600, filepath.Dir(path): 0o700 | os.ModeDir} {
+		if fi, err := os.Stat(p); err != nil {
+			t.Error(err)
+		} else if fi.Mode() != want {
+			t.Errorf("%s is %v, want %v", p, fi.Mode(), want)
+		}
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(path)); len(entries) != 1 {
+		t.Errorf("the settings folder holds %d files, want only the settings", len(entries))
+	}
+	if got, err := Load(); err != nil || got.WebPassword != "hash" {
+		t.Errorf("loaded %q, %v; want the password saved", got.WebPassword, err)
 	}
 }

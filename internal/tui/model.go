@@ -56,6 +56,7 @@ type Backend interface {
 	Devices() []encode.Device // what the queue encodes on
 	Watching() bool           // whether this queue's cav1ar is the one watching folders
 	Daemon() bool             // whether the queue is a daemon's, which carries on once the UI closes
+	Err() error               // why the latest request failed, if one has since Err was last called
 }
 
 // Local is a queue of the UI's own, whose folders w watches.
@@ -69,6 +70,10 @@ type local struct {
 func (l local) Watching() bool       { return l.w.Active() }
 func (l local) Daemon() bool         { return false }
 func (l local) Totals() (int64, int) { return l.w.Totals() }
+func (l local) Err() error           { return nil } // its requests can't fail
+
+// lostStatus is why the queue can't be changed once the daemon has gone.
+const lostStatus = "The daemon has gone, so that can't be done. Reopen cav1ar once it's running again."
 
 // clearStatusMsg hides the status line, unless a newer status replaced it.
 type clearStatusMsg struct{ id int }
@@ -109,10 +114,10 @@ type Model struct {
 	folderRow      int            // selected row of the folders list
 	confirmDiscard bool           // esc was pressed with unsaved changes
 
-	fullLog     bool // show all of the selected job's output, not just its steps
-	follow      bool // keep the log scrolled to the bottom
-	logDirty    bool // the selected job's log needs re-rendering
-	confirmQuit bool
+	fullLog     bool   // show all of the selected job's output, not just its steps
+	follow      bool   // keep the log scrolled to the bottom
+	logDirty    bool   // the selected job's log needs re-rendering
+	confirmQuit string // the key pressed to quit while encodes run, which quits if pressed again
 
 	status    string
 	statusBad bool
@@ -175,14 +180,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Another UI, or the settings file, may have changed these.
 		m.settings, m.paused, m.holding = m.queue.Settings(), m.queue.Paused(), m.queue.Holding()
 		m.setPauseHelp()
+		cmds = append(cmds, m.failed()) // a daemon turns requests down after they're sent
 	case clearStatusMsg:
 		if msg.id == m.statusID {
 			m.status = ""
 		}
 	case tea.KeyPressMsg:
-		if key.Matches(msg, m.keys.Kill) {
-			return m, tea.Quit
+		// Quitting while the UI's own queue encodes cancels the encodes, so
+		// it asks first, whichever key quits.
+		if key.Matches(msg, m.keys.Kill) || m.screen == screenQueue && key.Matches(msg, m.keys.Quit) {
+			if m.confirmQuit != "" || m.count(encode.Running) == 0 || m.queue.Daemon() {
+				return m, tea.Quit
+			}
+			m.confirmQuit = msg.String()
+			m.layout()
+			return m, nil
 		}
+		m.confirmQuit = ""
 	}
 
 	// The open screen gets every key, plus anything else its components may
@@ -210,16 +224,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) queueKey(msg tea.KeyPressMsg) tea.Cmd {
-	if key.Matches(msg, m.keys.Quit) {
-		if m.confirmQuit || m.count(encode.Running) == 0 || m.queue.Daemon() {
-			return tea.Quit
-		}
-		m.confirmQuit = true
-		return nil
-	}
-
-	m.confirmQuit = false
 	switch {
+	case m.lost && key.Matches(msg, m.keys.Add, m.keys.Cancel, m.keys.Retry, m.keys.Pause, m.keys.PauseNow):
+		return m.setStatus(lostStatus, true)
 	case key.Matches(msg, m.keys.Up):
 		m.moveCursor(-1)
 	case key.Matches(msg, m.keys.Down):
@@ -248,10 +255,12 @@ func (m *Model) queueKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, m.keys.Cancel):
 		if m.cursor < len(m.jobs) {
 			m.queue.Cancel(m.jobs[m.cursor].ID)
+			return m.failed()
 		}
 	case key.Matches(msg, m.keys.Retry):
 		if m.cursor < len(m.jobs) {
 			m.queue.Retry(m.jobs[m.cursor].ID)
+			return m.failed()
 		}
 	case key.Matches(msg, m.keys.Add):
 		m.openPicker(pickAdd)
@@ -259,8 +268,11 @@ func (m *Model) queueKey(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, m.keys.Settings):
 		return m.openSettings(newDraft(m.settings, m.queue.Devices()), m.section)
 	case key.Matches(msg, m.keys.Pause):
+		m.queue.SetHolding(!m.holding)
+		if cmd := m.failed(); cmd != nil {
+			return cmd
+		}
 		m.holding = !m.holding
-		m.queue.SetHolding(m.holding)
 		m.setPauseHelp()
 		switch {
 		case !m.holding:
@@ -270,8 +282,11 @@ func (m *Model) queueKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return m.setStatus("Paused. Press p to carry on.", false)
 	case key.Matches(msg, m.keys.PauseNow):
+		m.queue.SetPaused(!m.paused)
+		if cmd := m.failed(); cmd != nil {
+			return cmd
+		}
 		m.paused = !m.paused
-		m.queue.SetPaused(m.paused)
 		m.setPauseHelp()
 		if m.paused {
 			return m.setStatus("Paused. Press P to carry on where it left off.", false)
@@ -459,6 +474,14 @@ func (m *Model) moveCursor(n int) {
 	}
 	at := slices.Index(rows, m.cursor)
 	m.selectJob(rows[min(max(at+n, 0), len(rows)-1)])
+}
+
+// failed shows why the latest request to the queue failed, if one did.
+func (m *Model) failed() tea.Cmd {
+	if err := m.queue.Err(); err != nil {
+		return m.setStatus(err.Error(), true)
+	}
+	return nil
 }
 
 // setStatus shows a message in the footer for a few seconds.

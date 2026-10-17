@@ -111,6 +111,9 @@ func (m *Model) addPath(path string) tea.Cmd {
 // addFiles queues paths, skipping any already in the list. Finished jobs are
 // rerun with retry instead, so the list never holds the same file twice.
 func (m *Model) addFiles(paths ...string) tea.Cmd {
+	if m.lost {
+		return m.setStatus(lostStatus, true)
+	}
 	// Ask the queue rather than m.jobs, which lags until its events arrive.
 	listed := map[string]bool{}
 	for _, j := range m.queue.Jobs() {
@@ -123,6 +126,9 @@ func (m *Model) addFiles(paths ...string) tea.Cmd {
 		}
 		listed[p] = true
 		m.queue.Add(p)
+		if cmd := m.failed(); cmd != nil {
+			return cmd
+		}
 		added = append(added, filepath.Base(p))
 	}
 	switch len(added) {
