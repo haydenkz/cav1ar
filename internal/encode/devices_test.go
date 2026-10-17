@@ -42,8 +42,8 @@ func TestSlotsDefaultsAndOverrides(t *testing.T) {
 // numbers calibrated, they give about the same quality, and better quality
 // always means a lower number on every scale.
 func TestQualityMapsOntoEachEncoder(t *testing.T) {
-	if svtCRF(30) != 27 || vaapiQP(30) != 68 || vaapiQP(34) != 86 {
-		t.Errorf("30 maps to CRF %d and QP %d, and 34 to QP %d; want 27, 68 and 86", svtCRF(30), vaapiQP(30), vaapiQP(34))
+	if svtCRF(30) != 27 || vaapiQP(30) != 54 || vaapiQP(34) != 72 {
+		t.Errorf("30 maps to CRF %d and QP %d, and 34 to QP %d; want 27, 54 and 72", svtCRF(30), vaapiQP(30), vaapiQP(34))
 	}
 	for q := 2; q <= 63; q++ {
 		if svtCRF(q) < svtCRF(q-1) || vaapiQP(q) < vaapiQP(q-1) {
@@ -61,7 +61,7 @@ func TestVAAPIDecodesOnItsGPU(t *testing.T) {
 	if !hasArgs(before, "-init_hw_device", "vaapi=gpu:/dev/dri/renderD128") || !hasArgs(before, "-hwaccel", "vaapi") {
 		t.Errorf("decoding on the GPU should open it for the decoder too: %q", before)
 	}
-	if !hasArgs(after, "-global_quality:v", "68") || !hasArgs(after, "-vf", "scale_vaapi=w=1920:h=1080:format=p010") {
+	if !hasArgs(after, "-global_quality:v", "54") || !hasArgs(after, "-vf", "scale_vaapi=w=1920:h=1080:format=p010") {
 		t.Errorf("encoding options %q", after)
 	}
 	before, after = videoArgs(DefaultSettings(), testArc, v, 1280, 720, false)
