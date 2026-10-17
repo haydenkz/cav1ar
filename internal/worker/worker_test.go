@@ -23,6 +23,7 @@ for a in "$@"; do
 done
 printf 'frame=5\nprogress=continue\nframe=10\nprogress=end\n'
 echo "fake ffmpeg ran" >&2
+echo "args: $*" >&2
 `
 
 // fakeQueue records the devices workers bring.
@@ -60,6 +61,12 @@ func (q *fakeQueue) SetWorkerDevices(name string, devices []encode.Device) {
 // setup starts a server, and a worker called "test" for it, returning the
 // server once the worker has joined, and a function that stops the worker.
 func setup(t *testing.T, allow ...string) (*Server, *fakeQueue, context.CancelFunc) {
+	return setupWith(t, Options{Allow: allow})
+}
+
+// setupWith is setup with the worker's options as given, apart from those
+// that connect it.
+func setupWith(t *testing.T, o Options) (*Server, *fakeQueue, context.CancelFunc) {
 	t.Helper()
 	bin := filepath.Join(t.TempDir(), "ffmpeg")
 	if err := os.WriteFile(bin, []byte(fakeFFmpeg), 0o755); err != nil {
@@ -69,7 +76,11 @@ func setup(t *testing.T, allow ...string) (*Server, *fakeQueue, context.CancelFu
 	encode.FFmpeg = bin
 	t.Cleanup(func() { encode.FFmpeg = old }) // runs last, once the worker has stopped
 
-	q := &fakeQueue{dir: t.TempDir(), devices: map[string][]encode.Device{}, changed: make(chan struct{}, 10)}
+	dir := o.Addr // the shared folder, as the daemon sees it, if the test chose one
+	if dir == "" {
+		dir = t.TempDir()
+	}
+	q := &fakeQueue{dir: dir, devices: map[string][]encode.Device{}, changed: make(chan struct{}, 10)}
 	s, err := Listen("127.0.0.1:0", "secret", q)
 	if err != nil {
 		t.Fatal(err)
@@ -80,8 +91,9 @@ func setup(t *testing.T, allow ...string) (*Server, *fakeQueue, context.CancelFu
 	t.Cleanup(func() { stop(); <-stopped })
 	go func() {
 		defer close(stopped)
-		Work(ctx, Options{Addr: s.Addr().String(), Token: "secret", Name: "test", Allow: allow,
-			Devices: []encode.Device{{ID: "vaapi:0000:0c:00.0", Kind: encode.EncoderVAAPI, Name: "Test GPU"}}, Log: t.Logf})
+		o.Addr, o.Token, o.Name, o.Log = s.Addr().String(), "secret", "test", t.Logf
+		o.Devices = []encode.Device{{ID: "vaapi:0000:0c:00.0", Kind: encode.EncoderVAAPI, Name: "Test GPU"}}
+		Work(ctx, o)
 	}()
 	select {
 	case <-q.changed:
@@ -205,5 +217,42 @@ func TestAWorkerMustSeeTheSharedFolder(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "seen"), nil, 0o644)
 	if err := checkShared(&welcome{WorkDir: dir, Check: "seen"}); err != nil {
 		t.Errorf("a worker that sees it was turned away: %v", err)
+	}
+}
+
+func TestPathsMapOntoTheWorkers(t *testing.T) {
+	maps := []PathMap{{"/mnt/media", "/media"}, {"/mnt/media/tv", "/tv"}, {"/", "/root-of-all"}}
+	for in, want := range map[string]string{
+		"/mnt/media":           "/media",
+		"/mnt/media/film.mkv":  "/media/film.mkv",
+		"/mnt/media/tv/ep.mkv": "/tv/ep.mkv", // the longest mapping wins
+		"/mnt/mediaserver/x":   "/root-of-all/mnt/mediaserver/x",
+		"-c:v":                 "-c:v",
+		"vaapi=gpu:/dev/dri/x": "vaapi=gpu:/dev/dri/x",
+	} {
+		if got := mapPath(maps, in); got != want {
+			t.Errorf("mapPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if _, err := ParsePathMap("relative=/abs"); err == nil {
+		t.Error("a relative path was accepted")
+	}
+}
+
+// A worker that sees the daemon's folders somewhere else joins, and its
+// passes get the paths as it sees them.
+func TestAWorkerWithOtherPathsJoinsAndRuns(t *testing.T) {
+	real := t.TempDir()
+	daemonView := filepath.Join(t.TempDir(), "daemon-view")
+	if err := os.Symlink(real, daemonView); err != nil {
+		t.Fatal(err)
+	}
+	s, _, _ := setupWith(t, Options{Addr: daemonView, Paths: []PathMap{{daemonView, real}}, Allow: []string{real}})
+	var l lines
+	if err := runner(t, s).Run(context.Background(), []string{"-i", daemonView + "/in.mkv"}, l.output()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(l.stderr, "args: -i "+real+"/in.mkv") {
+		t.Errorf("the pass was given %q", l.stderr)
 	}
 }

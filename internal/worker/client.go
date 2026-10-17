@@ -23,7 +23,8 @@ type Options struct {
 	Addr    string          // the daemon's, such as "192.168.1.10:7310"
 	Token   string          // the daemon's worker token
 	Name    string          // how the daemon knows this worker; the host name will do
-	Allow   []string        // folders passes may use, besides the GPUs; empty allows any
+	Allow   []string        // folders passes may use, besides the GPUs, as this worker sees them; empty allows any
+	Paths   []PathMap       // where folders the daemon names are on this worker, if not at the same paths
 	Devices []encode.Device // what this worker lends the daemon
 	Log     func(format string, args ...any)
 }
@@ -54,6 +55,37 @@ func Work(ctx context.Context, o Options) error {
 	}
 }
 
+// PathMap says a folder the daemon sees at From is at To on the worker.
+type PathMap struct{ From, To string }
+
+// ParsePathMap reads a folder mapping written as daemon-path=worker-path.
+func ParsePathMap(s string) (PathMap, error) {
+	from, to, ok := strings.Cut(s, "=")
+	from, to = filepath.Clean(strings.TrimSpace(from)), filepath.Clean(strings.TrimSpace(to))
+	if !ok || !filepath.IsAbs(from) || !filepath.IsAbs(to) {
+		return PathMap{}, fmt.Errorf("%q isn't daemon-path=worker-path, both full paths", s)
+	}
+	return PathMap{from, to}, nil
+}
+
+// mapPath turns a path as the daemon sees it into the same path on this
+// worker, by the longest mapping that takes it in. Anything else, such as
+// an option or a path no mapping takes in, is left as it is.
+func mapPath(maps []PathMap, p string) string {
+	best := -1
+	for i, m := range maps {
+		under := p == m.From || strings.HasPrefix(p, strings.TrimSuffix(m.From, "/")+"/")
+		if under && (best < 0 || len(m.From) > len(maps[best].From)) {
+			best = i
+		}
+	}
+	if best < 0 {
+		return p
+	}
+	m := maps[best]
+	return filepath.Join(m.To, strings.TrimPrefix(p, m.From))
+}
+
 // connect is one connection to the daemon, which lasts until either side
 // goes away. Passes still running when it ends are stopped.
 func connect(ctx context.Context, o Options) error {
@@ -66,7 +98,7 @@ func connect(ctx context.Context, o Options) error {
 	defer cancel()
 	go func() { <-ctx.Done(); nc.Close() }()
 
-	l := &link{nc: nc, enc: json.NewEncoder(nc), procs: map[int]*os.Process{}, allow: o.Allow}
+	l := &link{nc: nc, enc: json.NewEncoder(nc), procs: map[int]*os.Process{}, allow: o.Allow, paths: o.Paths}
 	dec := json.NewDecoder(nc)
 	if err := l.send(msg{Hello: &hello{Protocol: protocol, Token: o.Token, Name: o.Name, Devices: o.Devices}}); err != nil {
 		return err
@@ -78,6 +110,7 @@ func connect(ctx context.Context, o Options) error {
 	if m.Welcome == nil {
 		return errors.New("the daemon refused: " + m.Refused)
 	}
+	m.Welcome.WorkDir = mapPath(o.Paths, m.Welcome.WorkDir)
 	if err := checkShared(m.Welcome); err != nil {
 		l.send(msg{Error: err.Error()})
 		return err
@@ -123,6 +156,7 @@ func checkShared(wl *welcome) error {
 type link struct {
 	nc    net.Conn
 	allow []string
+	paths []PathMap
 
 	wmu sync.Mutex // one message at a time
 	enc *json.Encoder
@@ -140,6 +174,9 @@ func (l *link) send(m msg) error {
 
 // run runs one pass, sending what it writes as it goes, then how it ended.
 func (l *link) run(ctx context.Context, r run) {
+	for i, a := range r.Args {
+		r.Args[i] = mapPath(l.paths, a)
+	}
 	err := l.allowed(r.Args)
 	if err == nil {
 		err = l.ffmpeg(ctx, r)
