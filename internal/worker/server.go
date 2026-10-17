@@ -141,7 +141,7 @@ func (s *Server) join(nc net.Conn) (*conn, error) {
 	for _, d := range h.Devices {
 		d.Worker = h.Name
 		d.ID = h.Name + "/" + d.ID
-		d.Name += " on " + h.Name
+		d.Name += " (" + h.Name + ")"
 		c.devices = append(c.devices, d)
 	}
 	s.mu.Lock()

@@ -101,8 +101,8 @@ its GPU's driver, then run:
 cav1ar -worker daemon-host:7310 -allow /media
 ```
 
-The worker's GPUs then show up alongside the daemon's, named after the
-worker, and take jobs the same way. `-allow` keeps the daemon's passes to the
+The worker's GPUs then show up alongside the daemon's, with the worker's
+name after theirs, and take jobs the same way. `-allow` keeps the daemon's passes to the
 folders given, `-worker-name` names the worker, and `-ffmpeg` picks the
 ffmpeg it runs. Each time a worker connects, the daemon checks it sees the
 shared folder; a job whose worker goes away goes back in the queue. The token

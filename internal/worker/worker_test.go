@@ -118,7 +118,7 @@ func (l *lines) output() encode.Output {
 func TestAWorkerJoinsWithItsDevices(t *testing.T) {
 	_, q, _ := setup(t)
 	got := q.Devices()
-	if len(got) != 1 || got[0].ID != "test/vaapi:0000:0c:00.0" || got[0].Name != "Test GPU on test" || got[0].Worker != "test" {
+	if len(got) != 1 || got[0].ID != "test/vaapi:0000:0c:00.0" || got[0].Name != "Test GPU (test)" || got[0].Worker != "test" {
 		t.Errorf("the queue got %+v", got)
 	}
 	if entries, _ := os.ReadDir(q.dir); len(entries) != 0 {

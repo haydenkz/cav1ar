@@ -366,9 +366,6 @@ func runningInfo(j encode.Job) string {
 	if label != "" {
 		parts = append(parts, label)
 	}
-	if j.Action == encode.ActionEncode && j.Device != "" {
-		parts = append(parts, "on "+j.Device)
-	}
 	// A remux copies frames, as does adding a preroll, so their rate means little.
 	if j.FPS > 0 && j.Action != encode.ActionRemux && j.Step == "" {
 		parts = append(parts, fmt.Sprintf("%.0f fps", j.FPS))

@@ -289,8 +289,8 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 		if i > 0 {
 			stage += " again, decoding on the CPU"
 		}
-		if runner != nil {
-			stage += " on " + p.device.Worker
+		if action == ActionEncode {
+			stage += " on " + p.device.label()
 		}
 		u.stage(stage)
 		args := p.encodeArgs(av, side, hw)

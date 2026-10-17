@@ -52,6 +52,14 @@ type Device struct {
 // GPU reports whether d is a GPU rather than the CPU.
 func (d Device) GPU() bool { return d.Kind != EncoderCPU }
 
+// label is d's name as it reads after "on", as in "encoding on the CPU".
+func (d Device) label() string {
+	if d.ID == string(EncoderCPU) {
+		return "the CPU"
+	}
+	return d.Name
+}
+
 func init() {
 	// Number NVIDIA GPUs the way nvidia-smi does, so the number found for a
 	// GPU picks the same one in every ffmpeg cav1ar starts.
