@@ -237,7 +237,7 @@ func TestWaitReturnsOnceTheWatcherHasRecordedAndSaved(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Close()
-	entries, err := h.Recent(context.Background(), 0, 10, "")
+	entries, err := h.Recent(context.Background(), 0, 10, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
