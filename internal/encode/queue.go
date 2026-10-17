@@ -37,6 +37,12 @@ type Queue struct {
 // afterwards to let them clean up.
 func NewQueue(ctx context.Context, s Settings) *Queue { return newQueue(ctx, s, Devices()) }
 
+// NewQueueOn returns a queue that encodes on the devices given, rather than
+// those found here.
+func NewQueueOn(ctx context.Context, s Settings, devices []Device) *Queue {
+	return newQueue(ctx, s, devices)
+}
+
 func newQueue(ctx context.Context, s Settings, devices []Device) *Queue {
 	return &Queue{
 		ctx:      ctx,

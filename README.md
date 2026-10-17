@@ -62,6 +62,18 @@ its videos as movies or shows, `+`/`-` set its priority, and `d` removes it.
 Settings are saved to `~/.config/cav1ar/config.json`. A running daemon picks
 up changes made in the UI.
 
+## Web UI
+
+A daemon also serves a web UI, at `http://<host>:6767`:
+- the queue, with live progress and each job's steps and output
+- the history of every finished job
+- the encoders, by machine, and the watched folders
+- every setting
+
+Set a password under Settings → Web UI. Until then, anyone who can reach the
+page can control cav1ar, and the page says so. `web_listen` in
+`config.json`, or `-web`, changes the address, and empty turns it off.
+
 ## Encoders
 
 cav1ar finds what can encode AV1 when it starts: each NVIDIA GPU (RTX

@@ -64,6 +64,15 @@ func openState(path string) (*stateDB, error) {
 		db.Close()
 		return nil, err
 	}
+	// Jobs recorded before devices had names don't say which ran them.
+	var hasDevice int
+	db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'device'`).Scan(&hasDevice)
+	if hasDevice == 0 {
+		if _, err := db.Exec(`ALTER TABLE jobs ADD COLUMN device TEXT NOT NULL DEFAULT ''`); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	s := &stateDB{db}
 	if err := s.importJSON(filepath.Join(filepath.Dir(path), "watch.json")); err != nil {
 		db.Close()
@@ -170,10 +179,10 @@ func (s *stateDB) addJob(j Job, result string) error {
 	if j.Err != nil {
 		errText = j.Err.Error()
 	}
-	_, err := s.db.Exec(`INSERT INTO jobs (input, output, action, result, in_size, out_size, started, finished, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := s.db.Exec(`INSERT INTO jobs (input, output, action, result, in_size, out_size, started, finished, error, device)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.Input, j.Output, string(j.Action), result, j.InSize, j.OutSize,
-		unixOrZero(j.Started), unixOrZero(j.Finished), errText)
+		unixOrZero(j.Started), unixOrZero(j.Finished), errText, j.Device)
 	return err
 }
 

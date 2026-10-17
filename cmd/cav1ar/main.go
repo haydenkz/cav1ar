@@ -55,6 +55,7 @@ func main() {
 		return nil
 	})
 	listDevices := flag.Bool("devices", false, "list what can encode AV1 here, and exit")
+	flag.StringVar(&settings.WebListen, "web", saved.WebListen, "with -daemon: serve the web UI on this address; empty for none")
 	workFor := flag.String("worker", "", "lend this machine's GPUs to the cav1ar daemon at this address, such as 192.168.1.10:7310, "+
 		"instead of encoding for itself; it connects with the daemon's worker token")
 	host, _ := os.Hostname()
