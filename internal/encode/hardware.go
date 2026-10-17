@@ -317,7 +317,9 @@ func videoArgs(s Settings, d Device, v streamInfo, width, height int, hwDecode b
 			beforeInput = []string{"-vaapi_device", d.Path}
 			filters = append(cpuFilters(v, width, height, scale), "format=p010", "hwupload")
 		}
-		afterInput = []string{"-c:v", "av1_vaapi", "-rc_mode", "CQP", "-global_quality", strconv.Itoa(vaapiQP(s.CRF)), "-g", "240"}
+		// global_quality is an option every encoder has, so it must name the
+		// video's, or the audio encoder takes it too and Opus refuses it.
+		afterInput = []string{"-c:v", "av1_vaapi", "-rc_mode", "CQP", "-global_quality:v", strconv.Itoa(vaapiQP(s.CRF)), "-g", "240"}
 	default:
 		filters = cpuFilters(v, width, height, scale)
 		afterInput = []string{"-c:v", "libsvtav1", "-preset", strconv.Itoa(s.Preset), "-crf", strconv.Itoa(svtCRF(s.CRF))}
