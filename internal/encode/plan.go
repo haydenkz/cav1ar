@@ -756,10 +756,95 @@ func (p *plan) remuxArgs(out, av, audio, side string) []string {
 		args = append(args, "-map", sideFrom+"t:"+strconv.Itoa(i))
 	}
 	args = append(args, "-c", "copy")
-
-	if len(p.audio) > 0 && (s.AudioTracks == KeepLanguage || s.AudioTracks == KeepBest) {
+	if len(p.audio) > 0 && p.firstAudioDefault() {
 		args = append(args, "-disposition:a:0", "default")
 	}
+	args = append(args, p.tagArgs()...)
+	if p.prerollIn > 0 && !s.StripMetadata {
+		args = append(args, "-metadata", prerollTag+"=")
+	}
+	return append(args, "-max_muxing_queue_size", "4096", "-f", "matroska", out)
+}
+
+// joinArgs is the ffmpeg command line for putting the result together with
+// the preroll ahead of it, in one pass: list is an ffconcat list of the
+// preroll and main, a file of the video and audio, which the concat demuxer
+// joins; main, read again shifted along by the preroll's length, gives the
+// tags and chapters, and side the subtitles and attachments, shifted
+// likewise. mainInfo is what main holds, and id the preroll's.
+func (p *plan) joinArgs(out, list, main, side string, length time.Duration, id string, mainInfo mediaInfo) []string {
+	s := p.settings
+	shift := seconds6(length)
+	args := []string{"-hide_banner", "-nostdin", "-nostats", "-y", "-progress", "pipe:1",
+		"-f", "concat", "-safe", "0", "-i", list, "-itsoffset", shift, "-i", main}
+	if side != "" {
+		args = append(args, "-itsoffset", shift, "-i", side)
+	}
+	args = append(args, "-map", "0:v:0")
+	for i := range p.audio {
+		args = append(args, "-map", "0:a:"+strconv.Itoa(i))
+	}
+	for i := range p.subs {
+		args = append(args, "-map", "2:s:"+strconv.Itoa(i))
+	}
+	for i := range p.fonts {
+		args = append(args, "-map", "2:t:"+strconv.Itoa(i))
+	}
+	args = append(args, "-c", "copy")
+	// The concat demuxer takes the video's and audio's tags and flags from
+	// the preroll, so give them main's. Naming where any stream's tags come
+	// from stops ffmpeg copying the rest's by itself, so name every one.
+	if !s.StripMetadata {
+		args = append(args, "-map_metadata", "1", "-map_chapters", "1", "-map_metadata:s:v:0", "1:s:v:0")
+		for i := range p.audio {
+			args = append(args, fmt.Sprintf("-map_metadata:s:a:%d", i), fmt.Sprintf("1:s:a:%d", i))
+		}
+		for i := range p.subs {
+			args = append(args, fmt.Sprintf("-map_metadata:s:s:%d", i), fmt.Sprintf("2:s:s:%d", i))
+		}
+		for i := range p.fonts {
+			args = append(args, fmt.Sprintf("-map_metadata:s:t:%d", i), fmt.Sprintf("2:s:t:%d", i))
+		}
+	}
+	v, a := 0, 0
+	for _, st := range mainInfo.Streams {
+		switch {
+		case st.Type == "video" && !st.CoverArt && v == 0:
+			args = append(args, "-disposition:v:0", dispositionOf(st))
+			v++
+		case st.Type == "audio" && a < len(p.audio):
+			flags := dispositionOf(st)
+			if a == 0 && p.firstAudioDefault() {
+				flags = "default"
+			}
+			args = append(args, fmt.Sprintf("-disposition:a:%d", a), flags)
+			a++
+		}
+	}
+	args = append(args, p.tagArgs()...)
+	args = append(args, "-metadata", prerollTag+"="+id+" "+shift)
+	return append(args, "-max_muxing_queue_size", "4096", "-f", "matroska", out)
+}
+
+// mergeArgs is the ffmpeg command line that puts the encoding pass's video
+// and the audio pass's audio together in out, for the preroll to be joined
+// onto, since the concat demuxer joins whole files.
+func (p *plan) mergeArgs(out, av, audio string) []string {
+	return []string{"-hide_banner", "-nostdin", "-nostats", "-y", "-progress", "pipe:1", "-i", av, "-i", audio,
+		"-map", "0:v:0", "-map", "1:a", "-c", "copy", "-max_muxing_queue_size", "4096", "-f", "matroska", out}
+}
+
+// firstAudioDefault reports whether the first audio track kept is made the
+// default, as it is when the settings keep tracks by language.
+func (p *plan) firstAudioDefault() bool {
+	return p.settings.AudioTracks == KeepLanguage || p.settings.AudioTracks == KeepBest
+}
+
+// tagArgs are the subtitle flags and titles, and the tags, that the settings
+// give a result, whichever pass puts it together.
+func (p *plan) tagArgs() []string {
+	s := p.settings
+	var args []string
 	for i, sub := range p.subs {
 		var flags []string
 		if sub.Default {
@@ -809,10 +894,7 @@ func (p *plan) remuxArgs(out, av, audio, side string) []string {
 	if s.ReleaseGroup != "" {
 		args = append(args, "-metadata", "ENCODED_BY="+s.ReleaseGroup)
 	}
-	if p.prerollIn > 0 && !s.StripMetadata {
-		args = append(args, "-metadata", prerollTag+"=")
-	}
-	return append(args, "-max_muxing_queue_size", "4096", "-f", "matroska", out)
+	return args
 }
 
 // inLanguage returns the streams tagged with lang.

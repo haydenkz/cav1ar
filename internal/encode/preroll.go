@@ -316,18 +316,41 @@ func av1Config(ctx context.Context, path string) ([]byte, error) {
 	return data, nil
 }
 
-// addPreroll writes main, with the preroll ahead of it, to out.
-func addPreroll(ctx context.Context, s Settings, d Device, main string, mainInfo mediaInfo, out string, u updates) (time.Duration, error) {
-	u.step("adding the preroll")
-	u.stage("adding the preroll")
-	pre, length, err := prerollFor(ctx, s, d, main, mainInfo, u)
+// joinPreroll puts the result together in out with the preroll ahead of it,
+// in one pass: the encoding pass's video and audio from av, or its video and
+// the audio pass's audio, joined onto the preroll, and the subtitles and
+// attachments from side, moved along by the preroll's length. It returns
+// that length. intermediate picks a file for the passes' work.
+func joinPreroll(ctx context.Context, p *plan, out, av, audio, side string,
+	intermediate func() (string, func(), error), u updates) (time.Duration, error) {
+	run := func(args []string, dur time.Duration) error {
+		u.log("cav1ar: ffmpeg " + strings.Join(args, " "))
+		return runFFmpeg(ctx, args, dur, frameRate(p.video), u)
+	}
+	main := av
+	if audio != "" { // the concat demuxer joins whole files, so make one of the two
+		merged, done, err := intermediate()
+		if err != nil {
+			return 0, err
+		}
+		defer done()
+		if err := run(p.mergeArgs(merged, av, audio), p.info.Duration); err != nil {
+			return 0, err
+		}
+		main = merged
+	}
+	mainInfo, err := probe(ctx, main)
+	if err != nil {
+		return 0, err
+	}
+	pre, length, err := prerollFor(ctx, p.settings, p.device, main, mainInfo, u)
 	if err != nil {
 		return 0, err
 	}
 	if err := seamFits(ctx, pre, main, length); err != nil {
 		return 0, err
 	}
-	id, _ := prerollID(s.Preroll)
+	id, _ := prerollID(p.settings.Preroll)
 
 	list, err := os.CreateTemp("", "cav1ar-concat-*.txt")
 	if err != nil {
@@ -339,55 +362,7 @@ func addPreroll(ctx context.Context, s Settings, d Device, main string, mainInfo
 	if err := list.Close(); err != nil {
 		return 0, err
 	}
-
-	// The preroll and main's video and audio are joined by the concat
-	// demuxer; main's subtitles, attachments and chapters come from main
-	// itself, shifted along by the preroll's length.
-	args := []string{"-hide_banner", "-nostdin", "-nostats", "-y", "-v", "error",
-		"-f", "concat", "-safe", "0", "-i", list.Name(), "-itsoffset", seconds6(length), "-i", main,
-		"-map", "0:v:0"}
-	count := map[string]int{}
-	for _, st := range mainInfo.Streams {
-		if !st.CoverArt {
-			count[st.Type]++
-		}
-	}
-	for i := range count["audio"] {
-		args = append(args, "-map", "0:a:"+strconv.Itoa(i))
-	}
-	args = append(args, "-map", "1:s?", "-map", "1:t?", "-map_chapters", "1", "-map_metadata", "1", "-c", "copy")
-	for _, k := range []struct{ name, spec string }{{"video", "v"}, {"audio", "a"}, {"subtitle", "s"}, {"attachment", "t"}} {
-		for i := range count[k.name] {
-			spec := fmt.Sprintf("s:%s:%d", k.spec, i)
-			args = append(args, "-map_metadata:"+spec, "1:"+spec)
-		}
-	}
-	// Video and audio come through the concat demuxer, which takes their
-	// flags from the preroll, so put main's back.
-	v, a := 0, 0
-	for _, st := range mainInfo.Streams {
-		switch {
-		case st.Type == "video" && !st.CoverArt:
-			args = append(args, fmt.Sprintf("-disposition:v:%d", v), dispositionOf(st))
-			v++
-		case st.Type == "audio":
-			args = append(args, fmt.Sprintf("-disposition:a:%d", a), dispositionOf(st))
-			a++
-		}
-	}
-	args = append(args, "-metadata", prerollTag+"="+id+" "+seconds6(length),
-		"-max_muxing_queue_size", "4096", "-f", "matroska", "-progress", "pipe:1", out)
-	var rate float64
-	for _, st := range mainInfo.Streams {
-		if st.Type == "video" && !st.CoverArt {
-			rate = frameRate(st)
-			break
-		}
-	}
-	if err := runFFmpeg(ctx, args, mainInfo.Duration+length, rate, u); err != nil {
-		return 0, err
-	}
-	return length, nil
+	return length, run(p.joinArgs(out, list.Name(), main, side, length, id, mainInfo), mainInfo.Duration+length)
 }
 
 func dispositionOf(st streamInfo) string {
@@ -407,37 +382,16 @@ func dispositionOf(st streamInfo) string {
 	return strings.Join(flags, "+")
 }
 
-// checkJoin checks a file with a preroll against main, the file it was
-// joined onto: the same tracks, each longer by the preroll's length, and
-// video that decodes cleanly across the join.
-func checkJoin(ctx context.Context, joined string, main mediaInfo, length time.Duration) error {
-	info, err := probe(ctx, joined)
-	if err != nil {
-		return fmt.Errorf("it couldn't be read: %w", err)
-	}
-	count := func(m mediaInfo) map[string]int {
-		c := map[string]int{}
-		for _, st := range m.Streams {
-			if !st.CoverArt {
-				c[st.Type]++
-			}
-		}
-		return c
-	}
-	if got, want := count(info), count(main); fmt.Sprint(got) != fmt.Sprint(want) {
-		return fmt.Errorf("it has tracks %v, not %v", got, want)
-	}
-	want, got := longestPlayed(main.Streams)+length, longestPlayed(info.Streams)
-	if want-got > tolerance(want) {
-		return fmt.Errorf("it runs %s, not %s", got.Round(time.Second), want.Round(time.Second))
-	}
+// joinDecodes checks that a result's video decodes cleanly across the join
+// with the preroll, which runs for length.
+func joinDecodes(ctx context.Context, joined string, length time.Duration) error {
 	from := max(0, length-time.Second)
 	b, err := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-nostdin", "-ss", seconds6(from), "-t", "3",
 		"-i", joined, "-map", "0:v:0", "-f", "null", "-").CombinedOutput()
 	// Some sources give frames in pairs with the same timestamp, which
 	// players take in their stride but the null muxer complains about.
 	// They'd complain without a preroll too, so they're not counted, and
-	// timestamps across the join are checked separately below.
+	// timestamps across the join are checked separately by seamFits.
 	var complaints []string
 	for line := range strings.Lines(string(b)) {
 		if line = strings.TrimSpace(line); line != "" && !strings.Contains(line, "non monotonically increasing dts") {

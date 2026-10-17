@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -150,11 +151,10 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 	// library's storage, which then only reads the source and writes the
 	// result. A worker writes the encoding pass's, so they go where it can
 	// reach them too.
-	work, err := workDir()
+	passWork, err := workDir()
 	if err != nil {
 		return err
 	}
-	passWork := work
 	if d.Worker != "" {
 		if s.WorkerDir == "" {
 			return errors.New("encoding on a worker needs a folder it shares with this cav1ar; set worker_dir")
@@ -165,43 +165,18 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 		passWork = s.WorkerDir
 	}
 	tmp := tempPath(out)
-	if s.Preroll != "" { // the result is an intermediate too, which the preroll is joined onto
-		tmp = filepath.Join(work, filepath.Base(tmp))
-	}
 	release, err := holdTemp(tmp)
 	if err != nil {
 		return err
 	}
 	defer release()
 	defer os.Remove(tmp) // gone already, once the result is in place
-	mainInfo, err := encodeAndRemux(ctx, p, action, tmp, passWork, u)
+	err = encodeAndRemux(ctx, p, action, tmp, passWork, u)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	if err != nil {
 		return err
-	}
-	if s.Preroll != "" {
-		joined := tempPath(out)
-		release, err := holdTemp(joined)
-		if err != nil {
-			return err
-		}
-		defer release()
-		defer os.Remove(joined)
-		length, err := addPreroll(ctx, s, d, tmp, mainInfo, joined, u)
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err != nil {
-			return fmt.Errorf("adding the preroll: %w", err)
-		}
-		u.stage("checking the result with the preroll")
-		if err := checkJoin(ctx, joined, mainInfo, length); err != nil {
-			return fmt.Errorf("the result with the preroll failed its checks, so the original was kept: %w", err)
-		}
-		os.Remove(tmp)
-		tmp = joined
 	}
 	if out == in {
 		u.stage("replacing the original")
@@ -230,6 +205,9 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 // by what goes into it.
 func (p *plan) assembling() string {
 	parts := []string{"video"}
+	if p.settings.Preroll != "" {
+		parts = []string{"preroll", "video"}
+	}
 	if len(p.audio) > 0 {
 		parts = append(parts, "audio")
 	}
@@ -244,9 +222,10 @@ func (p *plan) assembling() string {
 
 // encodeAndRemux writes the result to tmp: an encoding pass writes the video
 // and audio, and the subtitles and attachments, to files of their own in
-// work, and a remuxing pass puts them together; see plan.encodeArgs. It
-// returns what the result holds, once it checks out.
-func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work string, u updates) (mediaInfo, error) {
+// work, and a remuxing pass puts them together, with the preroll ahead of
+// them if the settings want one; see plan.encodeArgs. It returns once the
+// result checks out.
+func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work string, u updates) error {
 	// intermediate picks a file for a pass to write, held so no cav1ar takes
 	// it for one left behind, and removed when done is called.
 	intermediate := func() (path string, done func(), err error) {
@@ -265,13 +244,13 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 
 	av, done, err := intermediate()
 	if err != nil {
-		return mediaInfo{}, err
+		return err
 	}
 	defer done()
 	var side string
 	if p.hasSide() {
 		if side, done, err = intermediate(); err != nil {
-			return mediaInfo{}, err
+			return err
 		}
 		defer done()
 	}
@@ -282,7 +261,7 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 	// The encoding pass runs where the device is.
 	runner, err := runnerFor(p.device)
 	if err != nil {
-		return mediaInfo{}, err
+		return err
 	}
 	for i, hw := range hwDecode {
 		stage := p.encodingPass()
@@ -301,7 +280,7 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 			err = runRemote(ctx, runner, args, p.info.Duration, frameRate(p.video), u)
 		}
 		if errors.Is(err, ErrWorkerGone) {
-			return mediaInfo{}, err
+			return err
 		}
 		if err == nil || ctx.Err() != nil || i == len(hwDecode)-1 {
 			break
@@ -309,7 +288,7 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 		u.log("cav1ar: decoding on the GPU failed (" + err.Error() + "), so trying again on the CPU")
 	}
 	if err != nil {
-		return mediaInfo{}, err
+		return err
 	}
 
 	// The audio can still stop early, in which case encode it again on its
@@ -319,36 +298,46 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 	if len(p.audio) > 0 {
 		info, err := probe(ctx, av)
 		if err != nil {
-			return mediaInfo{}, fmt.Errorf("the encoding pass's file couldn't be read: %w", err)
+			return fmt.Errorf("the encoding pass's file couldn't be read: %w", err)
 		}
 		var short *shortStream
 		if err := checkStreamLengths(info, p); errors.As(err, &short) && short.kind == "audio" {
 			u.log("cav1ar: the encoding pass's " + strings.TrimPrefix(short.Error(), "its ") +
 				", so encoding the audio again on its own")
 			if audio, done, err = intermediate(); err != nil {
-				return mediaInfo{}, err
+				return err
 			}
 			defer done()
 			u.step("encoding the audio again")
 			u.stage("encoding the audio again, on its own")
 			if err := run(p.audioArgs(audio), 0); err != nil {
-				return mediaInfo{}, err
+				return err
 			}
 		}
 	}
 
 	u.step("putting together")
 	u.stage(p.assembling())
-	if err := run(p.remuxArgs(tmp, av, audio, side), frameRate(p.video)); err != nil {
-		return mediaInfo{}, err
+	var added time.Duration // how long the preroll put ahead of the result runs
+	if p.settings.Preroll == "" {
+		err = run(p.remuxArgs(tmp, av, audio, side), frameRate(p.video))
+	} else if added, err = joinPreroll(ctx, p, tmp, av, audio, side, intermediate, u); err != nil && ctx.Err() == nil {
+		err = fmt.Errorf("adding the preroll: %w", err)
+	}
+	if err != nil {
+		return err
 	}
 	u.step("")
 	u.stage("checking the result")
-	info, err := verify(ctx, tmp, p)
-	if err != nil {
-		return info, fmt.Errorf("the result failed its checks, so the original was kept: %w", err)
+	if _, err := verify(ctx, tmp, p, added); err != nil {
+		return fmt.Errorf("the result failed its checks, so the original was kept: %w", err)
 	}
-	return info, nil
+	if added > 0 {
+		if err := joinDecodes(ctx, tmp, added); err != nil {
+			return fmt.Errorf("the result failed its checks, so the original was kept: %w", err)
+		}
+	}
+	return nil
 }
 
 // runFFmpeg runs ffmpeg, reporting its progress and output as it goes. rate
@@ -393,14 +382,24 @@ func runFFmpeg(ctx context.Context, args []string, duration time.Duration, rate 
 	return nil
 }
 
-// verify checks a result before it replaces or joins anything: it must have
-// AV1 video and the tracks planned, and its video and audio must run as long
-// as the source's did. ffmpeg has exited cleanly on encodes whose audio
-// stopped an hour early.
-func verify(ctx context.Context, out string, p *plan) (mediaInfo, error) {
+// verify checks a result before it replaces anything: it must have AV1
+// video and the tracks planned, and its video and audio must run as long as
+// the source's did, not counting added, the length of a preroll put ahead
+// of them. ffmpeg has exited cleanly on encodes whose audio stopped an hour
+// early.
+func verify(ctx context.Context, out string, p *plan, added time.Duration) (mediaInfo, error) {
 	info, err := probe(ctx, out)
 	if err != nil {
 		return info, fmt.Errorf("it couldn't be read: %w", err)
+	}
+	if added > 0 { // judge it by what follows the preroll
+		info.Duration = max(0, info.Duration-added)
+		info.Streams = slices.Clone(info.Streams)
+		for i, st := range info.Streams {
+			if st.Duration > 0 {
+				info.Streams[i].Duration = max(0, st.Duration-added)
+			}
+		}
 	}
 	count := map[string]int{}
 	for _, st := range info.Streams {
