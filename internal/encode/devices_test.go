@@ -61,7 +61,7 @@ func TestVAAPIDecodesOnItsGPU(t *testing.T) {
 	if !hasArgs(before, "-init_hw_device", "vaapi=gpu:/dev/dri/renderD128") || !hasArgs(before, "-hwaccel", "vaapi") {
 		t.Errorf("decoding on the GPU should open it for the decoder too: %q", before)
 	}
-	if !hasArgs(after, "-global_quality", "68") || !hasArgs(after, "-vf", "scale_vaapi=w=1920:h=1080:format=p010") {
+	if !hasArgs(after, "-global_quality:v", "68") || !hasArgs(after, "-vf", "scale_vaapi=w=1920:h=1080:format=p010") {
 		t.Errorf("encoding options %q", after)
 	}
 	before, after = videoArgs(DefaultSettings(), testArc, v, 1280, 720, false)
