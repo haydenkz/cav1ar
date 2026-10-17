@@ -3,6 +3,7 @@ package encode
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -80,7 +82,7 @@ func workDir() (string, error) {
 // for audio priming.
 func joinPoint(ctx context.Context, path string, length time.Duration) (time.Duration, error) {
 	// Read from the start: seeking would land on the preroll's only keyframe.
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "v:0",
+	out, err := exec.CommandContext(ctx, ffprobePath(), "-v", "error", "-select_streams", "v:0",
 		"-read_intervals", "%"+seconds6(length+3*time.Second), "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", path).Output()
 	if err != nil {
 		return 0, fmt.Errorf("finding the end of the preroll: %w", err)
@@ -233,7 +235,9 @@ func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main
 				rate, channelLayout(a.Channels), seconds6(length)))
 	}
 
-	key := sha256.Sum256([]byte(strings.Join(append([]string{id, hex.EncodeToString(config)}, args...), "\x00")))
+	// Another build of ffmpeg, or of the encoder in it, may encode the same
+	// preroll differently, so each has prerolls of its own.
+	key := sha256.Sum256([]byte(strings.Join(append([]string{id, hex.EncodeToString(config), buildFor(d)}, args...), "\x00")))
 	dir, err := os.UserCacheDir()
 	if err != nil {
 		return "", 0, err
@@ -246,14 +250,16 @@ func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", 0, err
 	}
+	removeStaleBuilds(dir)
 	// Jobs running at once may build the same one; each writes its own
-	// file, and whichever finishes last wins.
-	f, err := os.CreateTemp(dir, ".build-*.mkv")
+	// file, held so it isn't taken for one left behind, and whichever
+	// finishes last wins.
+	tmp := filepath.Join(dir, buildPrefix+rand.Text()+".mkv")
+	release, err := holdTemp(tmp)
 	if err != nil {
 		return "", 0, err
 	}
-	f.Close()
-	tmp := f.Name()
+	defer release()
 	defer os.Remove(tmp)
 	where := "the CPU"
 	if nvenc || vaapi {
@@ -270,6 +276,32 @@ func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main
 		return "", 0, err
 	}
 	return out, length, nil
+}
+
+// buildFor is the build of ffmpeg that encodes d's prerolls: a worker's own,
+// for a GPU on one, as it says when it joins, or else this cav1ar's.
+func buildFor(d Device) string {
+	if r, _ := runnerFor(d); r != nil && d.Kind != EncoderCPU {
+		if b, ok := r.(builder); ok {
+			return b.FFmpegBuild()
+		}
+	}
+	return FFmpegBuild()
+}
+
+// buildPrefix starts the names of prerolls being built.
+const buildPrefix = ".build-"
+
+// removeStaleBuilds removes the prerolls in dir that a cav1ar which stopped
+// abruptly left half built: those no job holds, leaving any made in the last
+// hour, which a job may be about to hold.
+func removeStaleBuilds(dir string) {
+	builds, _ := filepath.Glob(filepath.Join(dir, buildPrefix+"*.mkv"))
+	for _, b := range builds {
+		if fi, err := os.Lstat(b); err == nil && time.Since(fi.ModTime()) > time.Hour && !tempInUse(b) {
+			os.Remove(b)
+		}
+	}
 }
 
 // encodePreroll runs ffmpeg with args, which read the preroll clip, to write
@@ -303,7 +335,7 @@ func encodePreroll(ctx context.Context, s Settings, d Device, args []string, out
 		return err
 	}
 	defer done()
-	if err := copyFile(s.Preroll, clip); err != nil {
+	if err := copyInto(s.Preroll, clip); err != nil {
 		return err
 	}
 	result, done, err := shared()
@@ -323,12 +355,65 @@ func encodePreroll(ctx context.Context, s Settings, d Device, args []string, out
 		}
 		return fmt.Errorf("encoding the preroll: %w", err)
 	}
-	return copyFile(result, out)
+	return copyOut(result, out)
 }
 
-// copyFile copies from to to, which it creates or empties.
-func copyFile(from, to string) error {
+// A worker can write to the folder it shares with this cav1ar, so it could
+// swap a file there for a symlink to one of this cav1ar's, which reading
+// would copy into a result, and writing would overwrite. So a file there is
+// only read or written if it is a regular file, and not through a link.
+
+// openShared opens path, in the folder shared with workers, with flag, if
+// it is a regular file. O_NONBLOCK keeps a pipe put in its place from
+// holding up the open, and makes no difference to a regular file.
+func openShared(path string, flag int) (*os.File, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s isn't a regular file", path)
+	}
+	f, err := os.OpenFile(path, flag|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	if now, err := f.Stat(); err != nil || !now.Mode().IsRegular() || !os.SameFile(before, now) {
+		f.Close()
+		return nil, fmt.Errorf("%s changed as it was opened", path)
+	}
+	return f, nil
+}
+
+// regularShared checks that path, which may be in the folder shared with
+// workers, is a regular file, not a link to somewhere else.
+func regularShared(path string) error {
+	fi, err := os.Lstat(path)
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("%s isn't a regular file", path)
+	}
+	return err
+}
+
+// copyInto copies from to to, a file this cav1ar made in the folder shared
+// with workers, which it empties first.
+func copyInto(from, to string) error {
 	in, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	w, err := openShared(to, os.O_WRONLY|os.O_TRUNC)
+	if err != nil {
+		return err
+	}
+	return copyFile(w, in)
+}
+
+// copyOut copies from, a file a worker wrote in the folder it shares with
+// this cav1ar, to to, which it creates or empties.
+func copyOut(from, to string) error {
+	in, err := openShared(from, os.O_RDONLY)
 	if err != nil {
 		return err
 	}
@@ -337,11 +422,28 @@ func copyFile(from, to string) error {
 	if err != nil {
 		return err
 	}
+	return copyFile(w, in)
+}
+
+// copyFile copies in to w, then closes w.
+func copyFile(w, in *os.File) error {
 	if _, err := io.Copy(w, in); err != nil {
 		w.Close()
 		return err
 	}
 	return w.Close()
+}
+
+// unmatchedAudio is the codec of the first audio track p keeps as it was
+// that a preroll can't be encoded to match, if there is one. Tracks p
+// encodes are in codecs a preroll can match.
+func unmatchedAudio(p *plan) string {
+	for _, a := range p.audio {
+		if _, ok := audioEncoders[a.Codec]; a.copy && !ok {
+			return a.Codec
+		}
+	}
+	return ""
 }
 
 // audioEncoders are the encoders that can match each audio codec.
@@ -399,7 +501,7 @@ func seconds6(d time.Duration) string { return strconv.FormatFloat(d.Seconds(), 
 // av1Config reads the AV1 codec configuration (av1C) of a file's video,
 // which holds its sequence header.
 func av1Config(ctx context.Context, path string) ([]byte, error) {
-	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "v:0",
+	out, err := exec.CommandContext(ctx, ffprobePath(), "-v", "error", "-select_streams", "v:0",
 		"-show_streams", "-show_data", path).Output()
 	if err != nil {
 		return nil, fmt.Errorf("reading the AV1 header: %w", err)
@@ -438,6 +540,23 @@ func joinPreroll(ctx context.Context, p *plan, out, av, audio, side string,
 	run := func(args []string, dur time.Duration) error {
 		u.log("cav1ar: ffmpeg " + strings.Join(args, " "))
 		return runFFmpeg(ctx, args, dur, frameRate(p.video), u)
+	}
+	// A worker may have written the passes' files; see openShared.
+	for _, f := range []string{av, audio, side} {
+		if f == "" {
+			continue
+		}
+		if err := regularShared(f); err != nil {
+			return 0, err
+		}
+	}
+	// The preroll's audio is encoded to match each audio track the result
+	// keeps, which can't be done for some codecs kept as they were. Rather
+	// than fail the job, leave the preroll off this file.
+	if codec := unmatchedAudio(p); codec != "" {
+		u.log("cav1ar: leaving the preroll off: its audio can't be encoded to match the " + codec + " audio kept from the source")
+		u.note("preroll skipped")
+		return 0, run(p.remuxArgs(out, av, audio, side), p.info.Duration)
 	}
 	main := av
 	if audio != "" { // the concat demuxer joins whole files, so make one of the two
@@ -498,7 +617,7 @@ func dispositionOf(st streamInfo) string {
 // with the preroll, which runs for length.
 func joinDecodes(ctx context.Context, joined string, length time.Duration) error {
 	from := max(0, length-time.Second)
-	b, err := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-nostdin", "-ss", seconds6(from), "-t", "3",
+	b, err := exec.CommandContext(ctx, FFmpeg, "-v", "error", "-nostdin", "-ss", seconds6(from), "-t", "3",
 		"-i", joined, "-map", "0:v:0", "-f", "null", "-").CombinedOutput()
 	// Some sources give frames in pairs with the same timestamp, which
 	// players take in their stride but the null muxer complains about.
@@ -524,7 +643,7 @@ func joinDecodes(ctx context.Context, joined string, length time.Duration) error
 func seamFits(ctx context.Context, pre, main string, length time.Duration) error {
 	packets := func(path string, intervals ...string) ([]string, error) {
 		args := append([]string{"-v", "error", "-select_streams", "v:0"}, intervals...)
-		out, err := exec.CommandContext(ctx, "ffprobe", append(args,
+		out, err := exec.CommandContext(ctx, ffprobePath(), append(args,
 			"-show_entries", "packet=dts_time,pts_time,duration_time", "-of", "csv=p=0", path)...).Output()
 		if err != nil {
 			return nil, err

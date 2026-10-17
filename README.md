@@ -133,14 +133,32 @@ cav1ar -worker daemon-host:7310 -allow /media
 
 The worker's GPUs then show up alongside the daemon's, with the worker's
 name after theirs, and take jobs the same way. `-worker-name` names the
-worker, and `-ffmpeg` picks the ffmpeg it runs. A worker that sees the files
-at other paths, such as a NAS mounted elsewhere, maps each folder with
-`-map daemon-path=worker-path`, as in `-map /mnt/media=/media/nas`. `-allow`
-keeps the daemon's passes to the folders given, as the worker sees them.
+worker, with letters, digits, dots, dashes and underscores (the host name by
+default), and `-ffmpeg` picks the ffmpeg it runs. A worker that sees the
+files at other paths, such as a NAS mounted elsewhere, maps each folder with
+`-map daemon-path=worker-path`, as in `-map /mnt/media=/media/nas`.
 
 Each time a worker connects, the daemon checks it sees the shared folder; a
-job whose worker goes away goes back in the queue. The token is all that
-keeps others out, so only open the port to a network you trust.
+job whose worker goes away goes back in the queue. A worker that connects
+again before the daemon has noticed it went, as after losing power, takes
+its old connection's place, so give each worker a name of its own.
+
+The daemon and its workers must run the same version of cav1ar: one that
+connects to another version is refused, with a message saying which to
+update. They talk over TLS, under a certificate the daemon makes each time
+it starts, so there's nothing to set up. The token never crosses the
+network: each side proves it has it, with a proof that only holds for that
+connection, and a worker takes passes only from a daemon that has proved
+itself. Someone who can watch or redirect the traffic can't read it, learn
+the token, or stand in for either side. The token itself is the key to every
+worker, though, since whoever has it can run ffmpeg on them, so keep it to
+yourself, and only open the port to a network you trust.
+
+`-allow` keeps the daemon's passes to the folders given, as the worker sees
+them: every file a pass reads or writes must be in one of them, after
+following symlinks, and passes can only read local files, not URLs. It's a
+second line, which narrows what a daemon can do on a worker, rather than a
+sandbox: ffmpeg has more ways to reach a file than cav1ar checks for.
 
 ## File names
 

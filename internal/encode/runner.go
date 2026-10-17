@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,34 @@ import (
 // FFmpeg is the ffmpeg cav1ar runs to test devices and encode.
 var FFmpeg = "ffmpeg"
 
+// ffprobePath is the ffprobe that goes with FFmpeg: the one beside it, when
+// FFmpeg is a path, or else whichever is on the PATH.
+func ffprobePath() string {
+	if strings.ContainsRune(FFmpeg, filepath.Separator) {
+		return filepath.Join(filepath.Dir(FFmpeg), "ffprobe")
+	}
+	return "ffprobe"
+}
+
+// ffmpegBuilds holds what FFmpegBuild found for each ffmpeg.
+var ffmpegBuilds sync.Map
+
+// FFmpegBuild is what FFmpeg says of itself with -version: its version, how
+// it was built, and its libraries' versions, or nothing if it won't run. It
+// is worked out once for each FFmpeg.
+func FFmpegBuild() string {
+	ff := FFmpeg
+	if b, ok := ffmpegBuilds.Load(ff); ok {
+		return b.(string)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	out, _ := exec.CommandContext(ctx, ff, "-version").Output()
+	b := strings.TrimSpace(string(out))
+	ffmpegBuilds.Store(ff, b)
+	return b
+}
+
 // Process is a running pass, which pausing stops and starts again.
 type Process interface {
 	Signal(os.Signal) error
@@ -30,6 +60,11 @@ type Process interface {
 type Runner interface {
 	Run(ctx context.Context, args []string, out Output) error
 }
+
+// A Runner can also have a method FFmpegBuild() string, which says what
+// FFmpegBuild says on the worker, so that prerolls built there are built
+// again when its ffmpeg changes.
+type builder interface{ FFmpegBuild() string }
 
 // Output is where a pass on a worker sends what it writes, line by line.
 type Output struct {

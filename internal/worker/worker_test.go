@@ -2,12 +2,15 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,14 +71,7 @@ func setup(t *testing.T, allow ...string) (*Server, *fakeQueue, context.CancelFu
 // that connect it.
 func setupWith(t *testing.T, o Options) (*Server, *fakeQueue, context.CancelFunc) {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), "ffmpeg")
-	if err := os.WriteFile(bin, []byte(fakeFFmpeg), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	old := encode.FFmpeg
-	encode.FFmpeg = bin
-	t.Cleanup(func() { encode.FFmpeg = old }) // runs last, once the worker has stopped
-
+	useFFmpeg(t, fakeFFmpeg)
 	dir := o.Addr // the shared folder, as the daemon sees it, if the test chose one
 	if dir == "" {
 		dir = t.TempDir()
@@ -101,6 +97,19 @@ func setupWith(t *testing.T, o Options) (*Server, *fakeQueue, context.CancelFunc
 		t.Fatal("the worker didn't join")
 	}
 	return s, q, stop
+}
+
+// useFFmpeg has passes run script in place of ffmpeg, for the rest of the
+// test.
+func useFFmpeg(t *testing.T, script string) {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := encode.FFmpeg
+	encode.FFmpeg = bin
+	t.Cleanup(func() { encode.FFmpeg = old }) // runs last, once the worker has stopped
 }
 
 func runner(t *testing.T, s *Server) *conn {
@@ -203,7 +212,11 @@ func TestPassesStayInTheFoldersAllowed(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "/etc/passwd") {
 		t.Errorf("got %v, want /etc/passwd refused", err)
 	}
-	if err := c.Run(context.Background(), []string{"-i", "/media/a.mkv", "/media/../media/b.mkv"}, (&lines{}).output()); err != nil {
+	err = c.Run(context.Background(), []string{"-i", "/media/a.mkv", "/media/../etc/b.mkv"}, (&lines{}).output())
+	if err == nil || !strings.Contains(err.Error(), "..") {
+		t.Errorf("got %v, want a path that climbs out with .. refused", err)
+	}
+	if err := c.Run(context.Background(), []string{"-i", "/media/a.mkv", "/media/b.mkv"}, (&lines{}).output()); err != nil {
 		t.Errorf("paths in /media were refused: %v", err)
 	}
 	_ = q
@@ -252,7 +265,124 @@ func TestAWorkerWithOtherPathsJoinsAndRuns(t *testing.T) {
 	if err := runner(t, s).Run(context.Background(), []string{"-i", daemonView + "/in.mkv"}, l.output()); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(l.stderr, "args: -i "+real+"/in.mkv") {
+	if !slices.Contains(l.stderr, "args: -protocol_whitelist file -i "+real+"/in.mkv") {
 		t.Errorf("the pass was given %q", l.stderr)
+	}
+}
+
+// pipeLink is a link to nothing but what collects the messages it sends.
+func pipeLink(t *testing.T) (*link, <-chan msg) {
+	a, b := net.Pipe()
+	t.Cleanup(func() { a.Close(); b.Close() })
+	sent := make(chan msg, 100)
+	go func() {
+		defer close(sent)
+		in := newReader(b, msgLimit)
+		for {
+			m, err := in.read()
+			if err != nil {
+				return
+			}
+			sent <- m
+		}
+	}()
+	return &link{nc: a, raw: a, enc: json.NewEncoder(a), procs: map[int]*proc{}}, sent
+}
+
+// exitOf waits for the exit of the pass with id among what a link sent.
+func exitOf(t *testing.T, sent <-chan msg, id int) *exit {
+	t.Helper()
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case m := <-sent:
+			if m.Exit != nil && m.Exit.ID == id {
+				return m.Exit
+			}
+		case <-timeout:
+			t.Fatalf("pass %d never ended", id)
+		}
+	}
+}
+
+// A kill or a pause that arrives before the pass has started isn't lost:
+// a pass killed first never runs, and one paused first is paused as soon as
+// it starts.
+func TestSignalsBeforeAPassStartsAreKept(t *testing.T) {
+	useFFmpeg(t, "#!/bin/sh\nsleep 0.2\ntouch \"$1\"\n")
+	l, sent := pipeLink(t)
+	dir := t.TempDir()
+
+	killed := filepath.Join(dir, "killed")
+	l.begin(1)
+	l.signal(signal{ID: 1, Name: "kill"})
+	l.run(context.Background(), run{ID: 1, Args: []string{killed}})
+	if e := exitOf(t, sent, 1); e.Err == "" {
+		t.Error("a pass killed before it started ended as if it had run")
+	}
+	if _, err := os.Stat(killed); err == nil {
+		t.Error("a pass killed before it started ran")
+	}
+
+	paused := filepath.Join(dir, "paused")
+	l.begin(2)
+	l.signal(signal{ID: 2, Name: "stop"})
+	go l.run(context.Background(), run{ID: 2, Args: []string{paused}})
+	time.Sleep(time.Second)
+	if _, err := os.Stat(paused); err == nil {
+		t.Error("a pass paused before it started ran on")
+	}
+	l.signal(signal{ID: 2, Name: "cont"})
+	if e := exitOf(t, sent, 2); e.Err != "" {
+		t.Errorf("the pass failed once carried on: %s", e.Err)
+	}
+	if _, err := os.Stat(paused); err != nil {
+		t.Error("the pass never finished once carried on")
+	}
+}
+
+// closeCount is a connection that notes being closed.
+type closeCount struct {
+	net.Conn
+	closed atomic.Bool
+}
+
+func (c *closeCount) Close() error { c.closed.Store(true); return c.Conn.Close() }
+
+// A worker whose messages can't get through lets go of the daemon at once,
+// rather than have every line a pass writes wait out the deadline.
+func TestAFailedWriteLetsTheDaemonGo(t *testing.T) {
+	a, b := net.Pipe()
+	nc := &closeCount{Conn: a}
+	l := &link{nc: nc, raw: nc, enc: json.NewEncoder(nc), procs: map[int]*proc{}}
+	b.Close()
+	if err := l.send(msg{Out: &out{ID: 1, Line: "frame=1"}}); err == nil {
+		t.Fatal("a write to a closed connection worked")
+	}
+	if !nc.closed.Load() {
+		t.Error("the connection was kept after a write failed")
+	}
+}
+
+func TestLongLinesAreSentInPieces(t *testing.T) {
+	var got []string
+	w := &lineWriter{line: func(line string) { got = append(got, line) }}
+	w.Write([]byte(strings.Repeat("x", lineLimit+10) + "\nshort\n"))
+	w.flush()
+	if len(got) != 3 || len(got[0]) != lineLimit || got[1] != strings.Repeat("x", 10) || got[2] != "short" {
+		t.Errorf("got %d lines, the first %d long", len(got), len(got[0]))
+	}
+}
+
+func TestWorkerNames(t *testing.T) {
+	for _, name := range []string{"gpu-box", "box.lan", "worker_2", strings.Repeat("a", nameLimit)} {
+		if !validName(name) {
+			t.Errorf("%q was turned down", name)
+		}
+	}
+	for _, name := range []string{"", "a b", "a/b", "a\nb", "naïve", "a:b", strings.Repeat("a", nameLimit+1)} {
+		if validName(name) {
+			t.Errorf("%q was let through", name)
+		}
 	}
 }
