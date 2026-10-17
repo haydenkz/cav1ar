@@ -22,6 +22,7 @@ type Client struct {
 	jobs     []encode.Job
 	pending  []encode.Event
 	settings encode.Settings
+	devices  []encode.Device
 	paused   bool
 	holding  bool
 	watching bool
@@ -75,6 +76,7 @@ func (c *Client) apply(msg message) {
 		c.settings = *msg.Settings
 	}
 	c.paused, c.holding, c.watching = msg.Paused, msg.Holding, msg.Watching
+	c.devices = msg.Devices
 	c.saved, c.results = msg.Saved, msg.Results
 	for _, w := range msg.Jobs {
 		j := w.job()
@@ -190,6 +192,13 @@ func (c *Client) Settings() encode.Settings {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.settings
+}
+
+// Devices lists what the daemon encodes on.
+func (c *Client) Devices() []encode.Device {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.devices)
 }
 
 // SetSettings shows s straight away. The daemon itself picks up settings

@@ -87,14 +87,15 @@ func prepare(ctx context.Context, in string, s Settings, log func(string)) (*pla
 	return p, nil
 }
 
-// encodeFile brings in into line with s: encoding, remuxing or renaming it,
-// or leaving it be if it already matches.
-func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
+// encodeFile brings in into line with s, encoding on d: encoding, remuxing
+// or renaming it, or leaving it be if it already matches.
+func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates) error {
 	u.stage("checking the file")
 	p, err := prepare(ctx, in, s, u.log)
 	if err != nil {
 		return err
 	}
+	p.device = d
 	for _, n := range p.notes {
 		u.log("cav1ar: " + n)
 	}
@@ -145,12 +146,6 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 		action = ActionRemux
 		u.planned(action, out)
 	}
-	if action == ActionEncode {
-		if err := CheckEncoder(s.Encoder); err != nil {
-			return err
-		}
-	}
-
 	// The passes' files are only intermediates, so keep them off the
 	// library's storage, which then only reads the source and writes the
 	// result.
@@ -183,7 +178,7 @@ func encodeFile(ctx context.Context, in string, s Settings, u updates) error {
 		}
 		defer release()
 		defer os.Remove(joined)
-		length, err := addPreroll(ctx, s, tmp, mainInfo, joined, u)
+		length, err := addPreroll(ctx, s, d, tmp, mainInfo, joined, u)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -270,7 +265,7 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 		defer done()
 	}
 	hwDecode := []bool{false}
-	if action == ActionEncode && p.settings.Encoder == EncoderNVIDIA {
+	if action == ActionEncode && p.device.GPU() {
 		hwDecode = []bool{true, false}
 	}
 	for i, hw := range hwDecode {

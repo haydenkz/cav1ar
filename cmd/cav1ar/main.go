@@ -5,9 +5,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -35,13 +37,27 @@ func main() {
 	retryFailed := flag.Bool("retry-failed", false, "in watched folders, retry videos whose jobs failed before")
 	local := flag.Bool("local", false, "open the UI with a queue of its own, even when a daemon is running")
 	showVersion := flag.Bool("version", false, "print the version and exit")
-	flag.Func("encoder", "video encoder: cpu, nvidia or vaapi (default \""+string(saved.Encoder)+"\")",
-		func(v string) error { settings.Encoder = encode.Encoder(v); return nil })
-	flag.IntVar(&settings.CRF, "crf", saved.CRF, "quality, 1–63; lower is better quality and bigger files")
+	flag.Func("encoders", "how many files each device encodes at once, e.g. nvidia=2,cpu=0; "+
+		"name a device by kind (cpu, nvidia, vaapi) or by its ID from -devices, and 0 turns it off", func(v string) error {
+		settings.Encoders = maps.Clone(settings.Encoders)
+		if settings.Encoders == nil {
+			settings.Encoders = map[string]int{}
+		}
+		for item := range strings.SplitSeq(v, ",") {
+			id, n, ok := strings.Cut(strings.TrimSpace(item), "=")
+			count, err := strconv.Atoi(n)
+			if !ok || id == "" || err != nil {
+				return fmt.Errorf("%q isn't device=number", item)
+			}
+			settings.Encoders[id] = count
+		}
+		return nil
+	})
+	listDevices := flag.Bool("devices", false, "list what can encode AV1 here, and exit")
+	flag.IntVar(&settings.CRF, "crf", saved.CRF, "quality, 1–63; lower is better quality and bigger files, about the same on every encoder")
 	flag.IntVar(&settings.Preset, "preset", saved.Preset, "CPU speed, 0 (slowest, smallest files) to 13 (fastest)")
 	flag.IntVar(&settings.NVENCPreset, "nvenc-preset", saved.NVENCPreset, "NVIDIA speed, 1 (fastest) to 7 (slowest, smallest files)")
 	flag.IntVar(&settings.MaxHeight, "max-height", saved.MaxHeight, "scale bigger video down to this height, e.g. 1080; 0 keeps the size")
-	flag.IntVar(&settings.Workers, "j", saved.Workers, "number of files to encode at once")
 	flag.Func("audio-codec", "audio codec: opus or aac (default \""+string(saved.AudioCodec)+"\")",
 		func(v string) error { settings.AudioCodec = encode.AudioCodec(v); return nil })
 	flag.IntVar(&settings.AudioKbps, "audio", saved.AudioKbps, "audio bitrate in kbps; -1 picks one per track, 0 copies the original audio")
@@ -84,6 +100,20 @@ func main() {
 		fmt.Println("cav1ar", version)
 		return
 	}
+	if *listDevices {
+		devices := encode.Devices()
+		if len(devices) == 0 {
+			fail(1, "%v", encode.ErrNoEncoder)
+		}
+		for _, d := range devices {
+			at := "off"
+			if n := settings.Slots(d, devices); n > 0 {
+				at = fmt.Sprintf("%d at once", n)
+			}
+			fmt.Printf("%-24s %-28s %s\n", d.ID, d.Name, at)
+		}
+		return
+	}
 
 	if err := settings.Validate(); err != nil {
 		fail(2, "%v", err)
@@ -91,7 +121,7 @@ func main() {
 	if fi, err := os.Stat(settings.OutDir); settings.OutDir != "" && (err != nil || !fi.IsDir()) {
 		fail(2, "output folder %s doesn't exist", settings.OutDir)
 	}
-	go encode.CheckEncoder(settings.Encoder) // test the encoders now, so it's done by the time it matters
+	go encode.Devices() // find them now, so it's done by the time it matters
 
 	statePath, err := config.StatePath()
 	if err != nil {

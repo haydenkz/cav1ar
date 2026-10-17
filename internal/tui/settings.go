@@ -3,10 +3,10 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,7 +29,15 @@ type settingsDraft struct {
 	encode.Settings
 	crf   string      // typed as text, so it can be invalid while being edited
 	audio audioChoice // codec and bitrate, picked together
+
+	// How many files each device encodes at once, or slotsAuto, as shown
+	// when the draft was made and as chosen since.
+	devices      []encode.Device
+	shown, slots []int
 }
+
+// slotsAuto leaves a device's number at once to the default.
+const slotsAuto = -1
 
 // audioChoice is one entry in the audio list.
 type audioChoice struct {
@@ -37,13 +45,62 @@ type audioChoice struct {
 	kbps  int
 }
 
-func newDraft(s encode.Settings) *settingsDraft {
+func newDraft(s encode.Settings, devices []encode.Device) *settingsDraft {
 	s.Watch = slices.Clone(s.Watch)
-	return &settingsDraft{
+	d := &settingsDraft{
 		Settings: s,
 		crf:      strconv.Itoa(s.CRF),
 		audio:    audioChoice{s.AudioCodec, s.AudioKbps},
+		devices:  devices,
 	}
+	for _, dev := range devices {
+		n, ok := s.Encoders[dev.ID]
+		if !ok {
+			n, ok = s.Encoders[string(dev.Kind)]
+		}
+		if !ok {
+			n = slotsAuto
+		}
+		d.shown = append(d.shown, n)
+	}
+	d.slots = slices.Clone(d.shown)
+	return d
+}
+
+// encoders is the draft's numbers at once, as settings. Until one changes,
+// they are kept as they were, which may name devices by their kind; after,
+// every device shown is named by its ID.
+func (d *settingsDraft) encoders() map[string]int {
+	if slices.Equal(d.slots, d.shown) {
+		return d.Encoders
+	}
+	enc := maps.Clone(d.Encoders)
+	if enc == nil {
+		enc = map[string]int{}
+	}
+	for i, dev := range d.devices {
+		delete(enc, string(dev.Kind))
+		delete(enc, dev.ID)
+		if d.slots[i] != slotsAuto {
+			enc[dev.ID] = d.slots[i]
+		}
+	}
+	if len(enc) == 0 {
+		return nil
+	}
+	return enc
+}
+
+// on reports whether the draft has a device of kind k encoding.
+func (d *settingsDraft) on(k encode.Encoder) bool {
+	s := d.Settings
+	s.Encoders = d.encoders()
+	for _, dev := range d.devices {
+		if dev.Kind == k && s.Slots(dev, d.devices) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // settings is the draft as settings to save, or why it can't be saved yet
@@ -55,8 +112,9 @@ func (d *settingsDraft) settings() (encode.Settings, int, error) {
 		return s, sectionVideo, fmt.Errorf("quality: %w", err)
 	}
 	s.CRF = crf
-	if err := encode.CheckEncoder(s.Encoder); err != nil {
-		return s, sectionVideo, err
+	s.Encoders = d.encoders()
+	if len(d.devices) > 0 && !slices.ContainsFunc(d.devices, func(dev encode.Device) bool { return s.Slots(dev, d.devices) > 0 }) {
+		return s, sectionVideo, errors.New("every encoder is off; turn one on")
 	}
 	if d.audio.kbps != encode.AudioCopy { // copying keeps the codec chosen before
 		s.AudioCodec = d.audio.codec
@@ -142,7 +200,7 @@ func (m *Model) showSection(i int) tea.Cmd {
 // the form can be rebuilt when one of them changes.
 func (m *Model) dependsOn() string {
 	d := m.draft
-	return fmt.Sprint(d.Encoder, d.audio.kbps == encode.AudioCopy, d.Subtitles == encode.KeepNone)
+	return fmt.Sprint(d.on(encode.EncoderCPU), d.on(encode.EncoderNVIDIA), d.audio.kbps == encode.AudioCopy, d.Subtitles == encode.KeepNone)
 }
 
 // settingsFormKeys moves between fields with the arrows and enter, leaving
@@ -166,49 +224,47 @@ func (m *Model) sectionFields(section int) []huh.Field {
 	rec := d.Settings.Recommended()
 	switch section {
 	case sectionVideo:
-		encoders := make([]huh.Option[encode.Encoder], 0, len(encode.Encoders))
-		for _, e := range encode.Encoders {
-			label := e.String()
-			if encode.CheckEncoder(e) != nil {
-				label += " (not found)"
+		var fields []huh.Field
+		for i, dev := range d.devices {
+			auto := "auto · 2 at once"
+			if !dev.GPU() {
+				auto = "auto · off while a GPU encodes"
 			}
-			encoders = append(encoders, option(label, e, rec.Encoder))
-		}
-		fields := []huh.Field{
-			huh.NewSelect[encode.Encoder]().Key("encoder").Title("Encoder").
-				Options(encoders...).Value(&d.Encoder).Inline(true).Validate(encode.CheckEncoder),
-			huh.NewInput().Key("crf").Title("Quality (CRF)").CharLimit(2).Value(&d.crf).
-				Validate(func(s string) error { _, err := parseCRF(s); return err }),
-		}
-		switch d.Encoder {
-		case encode.EncoderCPU:
-			presets := make([]huh.Option[int], 0, 14)
-			for p := 0; p <= 13; p++ {
-				presets = append(presets, option(presetLabel(p), p, rec.Preset))
+			opts := []huh.Option[int]{option(auto, slotsAuto, slotsAuto), option("off", 0, slotsAuto)}
+			for n := 1; n <= max(8, d.slots[i]); n++ {
+				opts = append(opts, option(fmt.Sprintf("%d at once", n), n, slotsAuto))
 			}
-			fields = append(fields, huh.NewSelect[int]().Key("preset").Title("Speed preset").
-				Options(presets...).Value(&d.Preset).Inline(true))
-		case encode.EncoderNVIDIA:
+			fields = append(fields, huh.NewSelect[int]().Key(fmt.Sprintf("slots%d", i)).Title(dev.Name).
+				Options(opts...).Value(&d.slots[i]).Inline(true))
+		}
+		if len(d.devices) == 0 {
+			fields = append(fields, huh.NewNote().Title("Encoders").Description(encode.ErrNoEncoder.Error()))
+		}
+		fields = append(fields, huh.NewInput().Key("crf").Title("Quality").CharLimit(2).Value(&d.crf).
+			Validate(func(s string) error { _, err := parseCRF(s); return err }))
+		if d.on(encode.EncoderNVIDIA) {
 			presets := make([]huh.Option[int], 0, 7)
 			for p := 1; p <= 7; p++ {
 				presets = append(presets, option(nvencPresetLabel(p), p, rec.NVENCPreset))
 			}
-			fields = append(fields, huh.NewSelect[int]().Key("nvencPreset").Title("Speed preset").
+			fields = append(fields, huh.NewSelect[int]().Key("nvencPreset").Title("NVIDIA speed").
 				Options(presets...).Value(&d.NVENCPreset).Inline(true))
+		}
+		if d.on(encode.EncoderCPU) {
+			presets := make([]huh.Option[int], 0, 14)
+			for p := 0; p <= 13; p++ {
+				presets = append(presets, option(presetLabel(p), p, rec.Preset))
+			}
+			fields = append(fields, huh.NewSelect[int]().Key("preset").Title("CPU speed").
+				Options(presets...).Value(&d.Preset).Inline(true))
 		}
 		maxHeights := []huh.Option[int]{option("keep original", 0, rec.MaxHeight)}
 		for _, h := range encode.MaxHeights {
 			maxHeights = append(maxHeights, option(fmt.Sprintf("scale down to %dp", h), h, rec.MaxHeight))
 		}
-		workers := make([]huh.Option[int], 0, runtime.NumCPU())
-		for n := 1; n <= max(runtime.NumCPU(), d.Workers); n++ {
-			workers = append(workers, option(strconv.Itoa(n), n, rec.Workers))
-		}
 		return append(fields,
 			huh.NewSelect[int]().Key("maxHeight").Title("Resolution").
 				Options(maxHeights...).Value(&d.MaxHeight).Inline(true),
-			huh.NewSelect[int]().Key("workers").Title("Encodes at once").
-				Options(workers...).Value(&d.Workers).Inline(true),
 		)
 
 	case sectionAudio:
@@ -291,17 +347,18 @@ func (m *Model) sectionFields(section int) []huh.Field {
 func (m *Model) fieldHelp(key string) string {
 	d := m.draft
 	rec := d.Settings.Recommended()
+	if strings.HasPrefix(key, "slots") {
+		return "How many files it encodes at once. Auto is 2 for a GPU, which keeps it busy. " +
+			"The CPU makes the smallest files at the same quality, but is many times slower, so auto leaves it off while a GPU encodes."
+	}
 	switch key {
-	case "encoder":
-		return "GPUs are much faster, but make bigger files at the same quality."
 	case "crf":
-		return fmt.Sprintf("1–63. Lower is better quality and bigger files. Recommended: %d.", rec.CRF)
+		return fmt.Sprintf("1–63. Lower is better quality and bigger files. "+
+			"Each encoder is set to give about the same quality for the same number. Recommended: %d.", rec.CRF)
 	case "preset", "nvencPreset":
 		return "Slower makes smaller files at the same quality."
 	case "maxHeight":
 		return "Bigger video is scaled down to fit. AV1 video that already fits is copied, not re-encoded."
-	case "workers":
-		return "How many files are encoded at once. One encode already keeps a CPU or GPU busy."
 	case "audio":
 		return "Auto is 128 kbps for stereo and 256 for 5.1 with Opus, half as much again with AAC. " +
 			"Tracks already in that codec and layout are copied."
@@ -373,7 +430,7 @@ func (m *Model) updateSettings(msg tea.Msg) tea.Cmd {
 		case key.Matches(k, m.keys.Save):
 			return m.saveDraft()
 		case key.Matches(k, m.keys.Recommend):
-			return tea.Batch(m.openSettings(newDraft(m.draft.Settings.Recommended()), m.section),
+			return tea.Batch(m.openSettings(newDraft(m.draft.Settings.Recommended(), m.draft.devices), m.section),
 				m.setStatus("Filled in the recommended settings. Look them over, then ctrl+s to save.", false))
 		case key.Matches(k, m.keys.Back):
 			if m.confirmDiscard || !m.draftChanged() {

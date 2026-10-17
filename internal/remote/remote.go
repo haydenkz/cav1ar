@@ -37,6 +37,7 @@ type message struct {
 	Logs     map[int][]string `json:"logs,omitempty"` // when the UI connects: recent output, by job
 	Events   []event          `json:"events,omitempty"`
 	Settings *encode.Settings `json:"settings,omitempty"` // when the UI connects, and when they change
+	Devices  []encode.Device  `json:"devices"`            // what the daemon encodes on
 	Paused   bool             `json:"paused"`
 	Holding  bool             `json:"holding"`
 	Watching bool             `json:"watching"`
