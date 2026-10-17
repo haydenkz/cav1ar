@@ -52,13 +52,19 @@ type Server struct {
 	started time.Time
 	history *encode.History // nil if the state database can't be read
 
+	// Changes to the settings are made one at a time, so two pages saving at
+	// once can't undo each other; logins are tried one at a time, to slow
+	// guessing.
+	settingsMu sync.Mutex
+	loginMu    sync.Mutex
+
 	mu       sync.Mutex
 	logs     map[int][]string
-	logOrder []int                // jobs with output kept, oldest first
-	states   map[int]encode.State // each job's state as last published
-	changed  map[int]encode.Job   // jobs changed since the last push
-	status   []byte               // the status last pushed, so it's sent only when it changes
-	clients  map[chan []byte]struct{}
+	logOrder []int                         // jobs with output kept, oldest first
+	states   map[int]encode.State          // each job's state as last published
+	changed  map[int]encode.Job            // jobs changed since the last push
+	status   []byte                        // the status last pushed, so it's sent only when it changes
+	clients  map[chan []byte]*http.Request // open event streams, with the requests that opened them
 	done     chan struct{}
 }
 
@@ -73,7 +79,7 @@ func Listen(o Options) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{o: o, addr: ln.Addr().String(), key: key, started: time.Now(), logs: map[int][]string{},
-		states: map[int]encode.State{}, changed: map[int]encode.Job{}, clients: map[chan []byte]struct{}{}, done: make(chan struct{})}
+		states: map[int]encode.State{}, changed: map[int]encode.Job{}, clients: map[chan []byte]*http.Request{}, done: make(chan struct{})}
 	if h, err := encode.OpenHistory(o.StatePath); err == nil {
 		s.history = h
 	}
@@ -82,8 +88,10 @@ func Listen(o Options) (*Server, error) {
 	assets, _ := fs.Sub(static, "static")
 	mux.Handle("GET /", http.FileServerFS(assets))
 	s.routes(mux)
-	// No write timeout: the event stream stays open.
-	s.http = &http.Server{Handler: s.guard(mux), ReadHeaderTimeout: 10 * time.Second}
+	// No write timeout: the event stream stays open, and sets its own for
+	// each write.
+	s.http = &http.Server{Handler: s.guard(mux), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute,
+		MaxHeaderBytes: 64 << 10}
 	go s.http.Serve(ln)
 	go s.push()
 	return s, nil
@@ -139,6 +147,7 @@ func (s *Server) push() {
 		case <-tick.C:
 		}
 		status, _ := json.Marshal(s.statusNow())
+		hash := s.o.Queue.Settings().WebPassword
 		s.mu.Lock()
 		var msgs [][]byte
 		if len(s.changed) > 0 {
@@ -154,7 +163,14 @@ func (s *Server) push() {
 			s.status = status
 			msgs = append(msgs, eventRaw("status", status))
 		}
-		for c := range s.clients {
+		for c, r := range s.clients {
+			// A stream opened before a password was set, or changed, ends,
+			// and the page asks to log in.
+			if hash != "" && !s.loggedIn(r, hash) {
+				delete(s.clients, c)
+				close(c)
+				continue
+			}
 			for _, m := range msgs {
 				select {
 				case c <- m:
@@ -173,16 +189,11 @@ func (s *Server) push() {
 
 // events streams what changes to a page: everything first, then changes.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming isn't supported", http.StatusInternalServerError)
-		return
-	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	c := make(chan []byte, 64)
 	s.mu.Lock()
-	s.clients[c] = struct{}{}
+	s.clients[c] = r
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -193,25 +204,38 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}()
 
-	w.Write(event("snapshot", s.snapshot()))
-	flusher.Flush()
+	// A page that stops reading is let go, rather than holding on forever.
+	rc := http.NewResponseController(w)
+	send := func(m []byte) bool {
+		rc.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		if _, err := w.Write(m); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
+	if !send(event("snapshot", s.snapshot())) {
+		return
+	}
 	alive := time.NewTicker(25 * time.Second)
 	defer alive.Stop()
 	for {
+		var m []byte
 		select {
 		case <-r.Context().Done():
 			return
 		case <-s.done:
 			return
-		case m, ok := <-c:
+		case msg, ok := <-c:
 			if !ok {
 				return
 			}
-			w.Write(m)
+			m = msg
 		case <-alive.C:
-			w.Write([]byte(": still here\n\n"))
+			m = []byte(": still here\n\n")
 		}
-		flusher.Flush()
+		if !send(m) {
+			return
+		}
 	}
 }
 
@@ -296,12 +320,27 @@ func (s *Server) statusNow() status {
 	return st
 }
 
+// keepFinished is how many of the jobs done or canceled since the daemon
+// started a page is sent when it opens, the most recent ones; the history
+// has the rest.
+const keepFinished = 200
+
 // snapshot is everything a page needs to start.
 func (s *Server) snapshot() any {
 	jobs := s.o.Queue.Jobs()
-	wire := make([]job, len(jobs))
-	for i, j := range jobs {
-		wire[i] = toWire(j)
+	over := -keepFinished // failed jobs are all sent, as they want seeing to
+	for _, j := range jobs {
+		if j.State == encode.Done || j.State == encode.Canceled {
+			over++
+		}
+	}
+	wire := make([]job, 0, len(jobs))
+	for _, j := range jobs {
+		if over > 0 && (j.State == encode.Done || j.State == encode.Canceled) {
+			over--
+			continue
+		}
+		wire = append(wire, toWire(j))
 	}
 	return struct {
 		Status status `json:"status"`

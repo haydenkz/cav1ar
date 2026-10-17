@@ -64,11 +64,18 @@ func openState(path string) (*stateDB, error) {
 		db.Close()
 		return nil, err
 	}
-	// Jobs recorded before devices had names don't say which ran them.
-	var hasDevice int
-	db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'device'`).Scan(&hasDevice)
-	if hasDevice == 0 {
-		if _, err := db.Exec(`ALTER TABLE jobs ADD COLUMN device TEXT NOT NULL DEFAULT ''`); err != nil {
+	// Jobs recorded before devices had names don't say which ran them, and
+	// ones recorded before the video's length was kept don't say how long it was.
+	for _, col := range []struct{ name, def string }{
+		{"device", "TEXT NOT NULL DEFAULT ''"},
+		{"duration", "REAL NOT NULL DEFAULT 0"}, // of the video, in seconds
+	} {
+		var has int
+		db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = ?`, col.name).Scan(&has)
+		if has > 0 {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE jobs ADD COLUMN ` + col.name + ` ` + col.def); err != nil {
 			db.Close()
 			return nil, err
 		}
@@ -179,10 +186,10 @@ func (s *stateDB) addJob(j Job, result string) error {
 	if j.Err != nil {
 		errText = j.Err.Error()
 	}
-	_, err := s.db.Exec(`INSERT INTO jobs (input, output, action, result, in_size, out_size, started, finished, error, device)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := s.db.Exec(`INSERT INTO jobs (input, output, action, result, in_size, out_size, started, finished, error, device, duration)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.Input, j.Output, string(j.Action), result, j.InSize, j.OutSize,
-		unixOrZero(j.Started), unixOrZero(j.Finished), errText, j.Device)
+		unixOrZero(j.Started), unixOrZero(j.Finished), errText, j.Device, j.Duration.Seconds())
 	return err
 }
 

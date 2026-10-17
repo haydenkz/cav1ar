@@ -123,6 +123,19 @@ func (q *Queue) Retry(id int) {
 	q.dispatchLocked()
 }
 
+// RunNext moves a queued job ahead of everything of its priority that was
+// queued with Add, as if it had been queued with AddNext.
+func (q *Queue) RunNext(id int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	j := q.jobLocked(id)
+	if j == nil || j.State != Queued || j.Next {
+		return
+	}
+	j.Next = true
+	q.emitLocked(*j, "")
+}
+
 // Settings returns the settings that new jobs will start with.
 func (q *Queue) Settings() Settings {
 	q.mu.Lock()

@@ -202,15 +202,15 @@ func TestHistoryReadsOldAndNewDatabases(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.Close()
-	all, err := h.Recent(context.Background(), 0, 10, "")
+	all, err := h.Recent(context.Background(), 0, 10, "", "")
 	if err != nil || len(all) != 2 || all[0].Input != "/b.mkv" || all[1].Device != "GPU" || all[1].Finished.Unix() != 200 {
 		t.Fatalf("got %+v, %v", all, err)
 	}
-	failed, _ := h.Recent(context.Background(), 0, 10, "failed")
+	failed, _ := h.Recent(context.Background(), 0, 10, "failed", "")
 	if len(failed) != 1 || failed[0].Err != "broke" {
 		t.Errorf("failed only: %+v", failed)
 	}
-	older, _ := h.Recent(context.Background(), all[0].ID, 10, "")
+	older, _ := h.Recent(context.Background(), all[0].ID, 10, "", "")
 	if len(older) != 1 || older[0].Input != "/a.mkv" {
 		t.Errorf("before the newest: %+v", older)
 	}

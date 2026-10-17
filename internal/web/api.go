@@ -1,9 +1,12 @@
 package web
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -25,10 +28,12 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/jobs/{id}/log", s.jobLog)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.jobOp(s.o.Queue.Cancel))
 	mux.HandleFunc("POST /api/jobs/{id}/retry", s.jobOp(s.o.Queue.Retry))
+	mux.HandleFunc("POST /api/jobs/{id}/next", s.jobOp(s.o.Queue.RunNext))
 	mux.HandleFunc("POST /api/add", s.add)
 	mux.HandleFunc("POST /api/pause", s.pause)
 	mux.HandleFunc("POST /api/hold", s.hold)
 	mux.HandleFunc("GET /api/history", s.historyPage)
+	mux.HandleFunc("GET /api/stats", s.stats)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	mux.HandleFunc("GET /api/browse", s.browse)
@@ -53,6 +58,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
 	hash := s.o.Queue.Settings().WebPassword
 	if hash == "" || !checkPassword(hash, req.Password) {
 		time.Sleep(time.Second) // slows guessing
@@ -75,6 +82,8 @@ func (s *Server) setPassword(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
 	settings := s.o.Queue.Settings()
 	settings.WebPassword = ""
 	if req.Password != "" {
@@ -129,10 +138,19 @@ func (s *Server) add(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	path := filepath.Clean(strings.TrimSpace(req.Path))
+	path := strings.TrimSpace(req.Path)
+	if !filepath.IsAbs(path) {
+		errorJSON(w, http.StatusBadRequest, errors.New("give the full path of a video or a folder"))
+		return
+	}
+	path = filepath.Clean(path)
 	fi, err := os.Stat(path)
 	if err != nil {
 		errorJSON(w, http.StatusBadRequest, err)
+		return
+	}
+	if !fi.IsDir() && !encode.IsVideo(path) {
+		errorJSON(w, http.StatusBadRequest, fmt.Errorf("%s isn't a video", filepath.Base(path)))
 		return
 	}
 	videos := []string{path}
@@ -165,15 +183,20 @@ func (s *Server) hold(w http.ResponseWriter, r *http.Request) {
 }
 
 // historyPage returns finished jobs, newest first: ?before= the oldest ID
-// already shown, ?result= done, failed or canceled to show only those.
+// already shown, ?result= done, failed or canceled to show only those, and
+// ?q= text to look for in their paths.
 func (s *Server) historyPage(w http.ResponseWriter, r *http.Request) {
 	if s.history == nil {
 		errorJSON(w, http.StatusServiceUnavailable, errNoHistory)
 		return
 	}
+	if s.noHistoryYet() {
+		writeJSON(w, map[string]any{"entries": []encode.Entry{}})
+		return
+	}
 	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
 	result := r.URL.Query().Get("result")
-	entries, err := s.history.Recent(r.Context(), before, 50, result)
+	entries, err := s.history.Recent(r.Context(), before, 50, result, strings.TrimSpace(r.URL.Query().Get("q")))
 	if err != nil {
 		errorJSON(w, http.StatusInternalServerError, err)
 		return
@@ -181,10 +204,48 @@ func (s *Server) historyPage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"entries": entries})
 }
 
+// noHistoryYet reports whether the state database is still to be made, as
+// it is until folders are first watched.
+func (s *Server) noHistoryYet() bool {
+	_, err := os.Stat(s.o.StatePath)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// stats sums up the jobs that finished in the last ?days= days, or all of
+// them if it's 0, counting days in the page's time zone: ?tz= minutes east
+// of UTC.
+func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
+	if s.history == nil {
+		errorJSON(w, http.StatusServiceUnavailable, errNoHistory)
+		return
+	}
+	if s.noHistoryYet() {
+		writeJSON(w, encode.Stats{})
+		return
+	}
+	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	tz, _ := strconv.Atoi(r.URL.Query().Get("tz"))
+	tz = min(max(tz, -14*60), 14*60)
+	var since time.Time
+	if days > 0 {
+		// From the start of the first day, in the page's time zone.
+		zone := time.FixedZone("", tz*60)
+		now := time.Now().In(zone)
+		since = time.Date(now.Year(), now.Month(), now.Day()-days+1, 0, 0, 0, 0, zone)
+	}
+	st, err := s.history.Stats(r.Context(), since, tz*60)
+	if err != nil {
+		errorJSON(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, st)
+}
+
 // settingsView is the settings as a page edits them, with what it needs to
 // offer the choices: never the password's hash.
 type settingsView struct {
 	Settings     encode.Settings `json:"settings"`
+	Version      string          `json:"version"` // sent back with changes, to catch ones made elsewhere since
 	PasswordSet  bool            `json:"password_set"`
 	Devices      []encode.Device `json:"devices"`
 	Recommended  encode.Settings `json:"recommended"`
@@ -197,7 +258,17 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	v := settingsView{Settings: settings, PasswordSet: settings.WebPassword != "", Devices: s.o.Queue.Devices(),
 		Recommended: settings.Recommended(), Placeholders: encode.NamePlaceholders, MaxHeights: encode.MaxHeights}
 	v.Settings.WebPassword, v.Recommended.WebPassword = "", ""
+	v.Version = settingsVersion(settings)
 	writeJSON(w, v)
+}
+
+// settingsVersion tells settings apart, but for the password, which is
+// changed on its own.
+func settingsVersion(s encode.Settings) string {
+	s.WebPassword = ""
+	data, _ := json.Marshal(s)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:8])
 }
 
 func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
@@ -205,7 +276,14 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &settings) {
 		return
 	}
-	settings.WebPassword = s.o.Queue.Settings().WebPassword // set on its own, with setPassword
+	s.settingsMu.Lock()
+	defer s.settingsMu.Unlock()
+	current := s.o.Queue.Settings()
+	if v := r.Header.Get("If-Match"); v != "" && v != settingsVersion(current) {
+		errorJSON(w, http.StatusConflict, errors.New("the settings were changed somewhere else since this page loaded them"))
+		return
+	}
+	settings.WebPassword = current.WebPassword // set on its own, with setPassword
 	if err := s.check(&settings); err != nil {
 		errorJSON(w, http.StatusBadRequest, err)
 		return
