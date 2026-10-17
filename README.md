@@ -23,7 +23,7 @@ keep every file in it encoded the way you like.
 
 ## Install
 
-Needs Linux, Go 1.27+, and ffmpeg built with `libsvtav1` and `libopus`.
+Needs Linux, Go 1.27.2+, and ffmpeg built with `libsvtav1` and `libopus`.
 MKVToolNix (`mkvpropedit` and `mkvextract`) is optional: with it, fixing a
 file's metadata takes a moment instead of a rewrite of the whole file.
 
@@ -33,17 +33,31 @@ cd cav1ar
 ./install.sh            # add --service to also run it in the background
 ```
 
+`--bin-dir DIR` installs somewhere other than `~/.local/bin`, and
+`--uninstall` removes cav1ar and its service, keeping your settings.
+
 ### Docker
 
 The image `ghcr.io/haydenkz/cav1ar` runs the daemon, with the web UI on port
 6767. It has everything cav1ar uses, from Jellyfin's ffmpeg. Give it a GPU
-with `--gpus all` for NVIDIA, or `--device /dev/dri` for Intel or AMD:
+with `--gpus all` for NVIDIA, which needs the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+on the host, or `--device /dev/dri` for Intel or AMD:
 
 ```sh
 docker run -d --name cav1ar --gpus all -p 6767:6767 \
   -e PUID=1000 -e PGID=1000 -v ./config:/config -v /srv/media:/media \
   ghcr.io/haydenkz/cav1ar
 ```
+
+Its settings, worker token and database are kept in `./config/cav1ar`. Add
+the folders to watch in the web UI, under Folders. Or, on the first run,
+before there are any settings, set `CAV1AR_MOVIES` and `CAV1AR_SHOWS`, as in
+`-e CAV1AR_MOVIES=/media/movies`: they're watched as the library's movie and
+show folders, with each result replacing its original under the same name,
+which suits Radarr and Sonarr.
+
+`latest` is the newest release, and `main` follows the main branch.
 
 [examples/stack](examples/stack) runs it alongside Radarr, Sonarr, SABnzbd and
 qBittorrent, as a compose file that also works as a Dockge stack.
@@ -85,9 +99,10 @@ A daemon also serves a web UI, at `http://<host>:6767`:
 - the encoders, by machine, and the watched folders
 - every setting
 
-Set a password under Settings → Web UI. Until then, anyone who can reach the
-page can control cav1ar, and the page says so. `web_listen` in
-`config.json`, or `-web`, changes the address, and empty turns it off.
+Set a password in the web UI, under Settings → Web UI. Until then, anyone
+who can reach the page can control cav1ar, and the page says so.
+`web_listen` in `config.json`, or `-web`, changes the address, and empty
+turns it off.
 
 ## Encoders
 
@@ -130,6 +145,9 @@ its GPU's driver, then run:
 ```sh
 cav1ar -worker daemon-host:7310 -allow /media
 ```
+
+The worker can also take the token from the `CAV1AR_WORKER_TOKEN`
+environment variable instead.
 
 The worker's GPUs then show up alongside the daemon's, with the worker's
 name after theirs, and take jobs the same way. `-worker-name` names the
@@ -186,8 +204,9 @@ puts them together in a quick remux. If the audio comes out short, which
 ffmpeg can do without saying so, it is encoded again on its own.
 
 Results are written to a hidden file next to the original, and only take its
-place once every track is checked to run its full length. With *delete
-originals* on, a file whose name doesn't change is replaced in place.
+place once every track is checked to run its full length. With Settings →
+Output → **Original file** set to *delete after a checked encode*, a file
+whose name doesn't change is replaced in place.
 `-retry-failed` gives files that failed another go.
 
 ## Prerolls
