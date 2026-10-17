@@ -72,8 +72,8 @@ work through a queue about twice as fast as one.
 By default each GPU encodes 2 files at once, which keeps its encoder busy
 while a job does its work on the CPU, such as checking the result. The CPU
 encodes only when no GPU does: it makes the smallest files at the same
-quality, but is many times slower. Settings → Video lists each device, to
-turn it off or give it a different number at once; `-encoders nvidia=1,cpu=0`
+quality, but is many times slower. Settings → Encoders lists each device by
+the machine it's on, to turn it off or give it a different number at once; `-encoders nvidia=1,cpu=0`
 does the same from the command line, by kind or by the IDs `-devices` shows.
 
 Quality is one number, 1–63 on NVENC's scale, where lower is better. The

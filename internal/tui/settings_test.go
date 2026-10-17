@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -87,8 +88,8 @@ func TestEnterMovesOnAndNeverSaves(t *testing.T) {
 		t.Fatalf("settings didn't open on Video: screen %d, section %d", m.screen, m.section)
 	}
 	m = press(m, "tab")
-	if m.section != sectionAudio {
-		t.Fatalf("tab went to section %d, not Audio", m.section)
+	if m.section != sectionEncoders {
+		t.Fatalf("tab went to section %d, not Encoders", m.section)
 	}
 	m = press(m, "shift+tab", "shift+tab")
 	if m.section != sectionFolders {
@@ -169,7 +170,7 @@ func TestSavingABadValueOpensItsSection(t *testing.T) {
 func TestFieldsFollowTheChoicesTheyDependOn(t *testing.T) {
 	m, q := newTestModel(t)
 	q.devices = testDevices
-	m = press(m, "s")
+	m = press(m, "s", "tab") // Encoders
 	has := func(key string) bool {
 		for _, f := range m.sectionFields(m.section) {
 			if f.GetKey() == key {
@@ -250,5 +251,25 @@ func TestEveryEncoderOffIsRefused(t *testing.T) {
 	m = press(m, "ctrl+s")
 	if q.saves != 0 || !strings.Contains(m.status, "every encoder is off") {
 		t.Errorf("%d saves, status %q; want it refused", q.saves, m.status)
+	}
+}
+
+// Encoders are listed by machine, and a worker's CPU only once it's on.
+func TestEncodersAreGroupedByMachine(t *testing.T) {
+	m, q := newTestModel(t)
+	q.devices = append(slices.Clone(testDevices),
+		encode.Device{ID: "w/vaapi:x", Kind: encode.EncoderVAAPI, Name: "Test Arc (w)", Worker: "w"},
+		encode.Device{ID: "w/cpu", Kind: encode.EncoderCPU, Name: "CPU (w)", Worker: "w"})
+	m = press(m, "s", "tab")
+	var got []string
+	for _, g := range m.draft.encoderGroups() {
+		got = append(got, g.title, fmt.Sprint(g.devices))
+	}
+	if want := []string{"── This machine", "[0 1]", "── w · worker", "[2]"}; !slices.Equal(got, want) {
+		t.Errorf("groups %q, want %q", got, want)
+	}
+	m.draft.slots[3] = 1
+	if g := m.draft.encoderGroups(); len(g) != 2 || len(g[1].devices) != 2 {
+		t.Error("a worker's CPU that's on should show")
 	}
 }
