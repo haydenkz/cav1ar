@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // DefaultNameTemplate names encodes like
@@ -185,14 +186,33 @@ var unsafeInName = strings.NewReplacer(
 	"/", "-", `\`, "-", ":", "", "*", "", "?", "", `"`, "", "<", "", ">", "", "|", "",
 )
 
-// fileName turns a name template into a file name for one encode.
+// maxName is the longest file name most filesystems allow, in bytes.
+const maxName = 255
+
+// fileName turns a name template into a file name for one encode, cut short
+// if need be to fit in maxName.
 func fileName(template string, r release) string {
+	const ext = ".mkv"
 	name := unsafeInName.Replace(r.expand(template))
 	name = strings.TrimSpace(extraSpace.ReplaceAllString(name, " "))
 	if name == "" {
 		name = r.Name
 	}
-	return name + ".mkv"
+	if len(name)+len(ext) > maxName {
+		name = strings.TrimRight(cutBytes(name, maxName-len(ext)), " -._")
+	}
+	return name + ext
+}
+
+// cutBytes cuts s to at most n bytes, without splitting a character.
+func cutBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // resolution names a frame size the way release names do, allowing for

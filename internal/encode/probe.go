@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -60,10 +61,19 @@ func (st streamInfo) Interlaced() bool {
 	return false
 }
 
+// FFprobe is the ffprobe that goes with FFmpeg: the one beside it when
+// FFmpeg is a path, or the one on the PATH when it isn't.
+func FFprobe() string {
+	if strings.ContainsRune(FFmpeg, filepath.Separator) {
+		return filepath.Join(filepath.Dir(FFmpeg), "ffprobe")
+	}
+	return "ffprobe"
+}
+
 func probe(ctx context.Context, in string) (mediaInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "ffprobe",
+	out, err := exec.CommandContext(ctx, FFprobe(),
 		"-v", "error",
 		"-show_entries", "format=duration:format_tags"+
 			":stream=index,codec_type,codec_name,channels,sample_rate,width,height,pix_fmt,level,bit_rate,duration"+

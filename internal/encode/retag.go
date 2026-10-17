@@ -27,6 +27,9 @@ var haveMKVToolNix = sync.OnceValue(func() bool {
 // flags, chapters and tags a remux would give it, then checks that the
 // file now matches the settings. Only the file's headers change, so it
 // takes a moment however big the file is.
+//
+// Once mkvpropedit starts, canceling ctx doesn't stop it, nor the check
+// after it: stopping it partway would leave the file half edited.
 func retag(ctx context.Context, p *plan) error {
 	dir, err := os.MkdirTemp("", "cav1ar-retag-")
 	if err != nil {
@@ -37,10 +40,14 @@ func retag(ctx context.Context, p *plan) error {
 	if err != nil {
 		return err
 	}
-	if out, err := exec.CommandContext(ctx, "mkvpropedit", args...).CombinedOutput(); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if out, err := exec.Command("mkvpropedit", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("mkvpropedit: %s", lastLine(string(out), err))
 	}
 
+	ctx = context.WithoutCancel(ctx)
 	info, err := probe(ctx, p.in)
 	if err != nil {
 		return err

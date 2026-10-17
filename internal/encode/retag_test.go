@@ -4,7 +4,10 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -102,5 +105,61 @@ func TestRetagFixesMetadataWithoutRewritingTheFile(t *testing.T) {
 	}
 	if a := again.action(); a != ActionNone {
 		t.Errorf("after the retag, want nothing left to do, got %s, plan %q", a, again.reasons())
+	}
+}
+
+// A file with another hard link, as an import linked from a download still
+// seeding has, isn't edited in place, which would edit the other link too:
+// it's remuxed into a new file instead.
+func TestRetagLeavesOtherHardLinksAlone(t *testing.T) {
+	if err := CheckEncoder(EncoderCPU); err != nil {
+		t.Skip(err)
+	}
+	if !haveMKVToolNix() {
+		t.Skip("needs MKVToolNix")
+	}
+	dir, outDir := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	ctx := context.Background()
+
+	first := testSettings(outDir)
+	p, err := prepare(ctx, makeSource(t, dir), first, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := encodeFile(ctx, p.in, first, cpuDevice, noUpdates()); err != nil {
+		t.Fatal(err)
+	}
+	encoded := p.out
+	seeding := filepath.Join(dir, "seeding.mkv")
+	if err := os.Link(encoded, seeding); err != nil {
+		t.Skip("can't make hard links here:", err)
+	}
+	before, err := os.Stat(seeding)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second := first
+	second.ReleaseGroup, second.DeleteOriginal = "OTHER", true
+	p, err = prepare(ctx, encoded, second, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.action() != ActionRemux || !slices.ContainsFunc(p.notes, func(n string) bool { return strings.Contains(n, "hard links") }) {
+		t.Fatalf("want a remux saying why, got %s and notes %q", p.action(), p.notes)
+	}
+	if err := encodeFile(ctx, encoded, second, cpuDevice, noUpdates()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(seeding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) || !after.ModTime().Equal(before.ModTime()) || after.Size() != before.Size() {
+		t.Error("the other hard link was changed")
+	}
+	if info, err := probe(ctx, p.out); err != nil || info.Tags["ENCODED_BY"] != "OTHER" {
+		t.Errorf("want a new file tagged OTHER, got %v (%v)", info.Tags["ENCODED_BY"], err)
 	}
 }
