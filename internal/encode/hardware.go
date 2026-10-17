@@ -277,15 +277,17 @@ var ErrNoEncoder = errors.New("nothing here can encode AV1: ffmpeg needs SVT-AV1
 	"or a GPU that can encode AV1 with its driver installed")
 
 // The quality setting is on NVENC's scale, and the other encoders are set to
-// match it: scored with VMAF on a 1080p test clip, at the recommended speed
-// presets, they land within half a point of NVENC at both 30 and 34.
+// match it, as scored with VMAF on 1080p clips: SVT-AV1 at the recommended
+// preset lands within half a point of NVENC at both 30 and 34, and VAAPI,
+// on an Intel Arc, within half a point at 30 on drama, animation and
+// reality TV alike.
 
 // svtCRF is SVT-AV1's CRF for quality q.
 func svtCRF(q int) int { return min(max(q-3, 1), 63) }
 
 // vaapiQP is the AV1 quantizer, 0–255, that VAAPI's constant quality mode
 // uses for quality q.
-func vaapiQP(q int) int { return min(max(int(math.Round(4.5*float64(q)))-67, 1), 255) }
+func vaapiQP(q int) int { return min(max(int(math.Round(4.5*float64(q)))-81, 1), 255) }
 
 // videoArgs are the ffmpeg options that encode v on d at width x height.
 // Quality and speed are mapped onto each encoder's own scale. hwDecode
