@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// Queue encodes files in the order they were added, keeping up to
-// Settings.Workers of them running at once.
+// Queue encodes files in the order they were added, keeping every device
+// busy with as many at once as the settings give it; see Settings.Slots.
 type Queue struct {
 	ctx    context.Context
 	wg     sync.WaitGroup
@@ -24,23 +24,37 @@ type Queue struct {
 	pausedAt time.Time
 	holding  bool // new jobs are held back, while running ones finish
 	closed   bool
-	running  int
+	devices  []Device       // what encodes, in the order they are filled
+	busy     map[string]int // running jobs, by the ID of their device
 	jobs     []*Job
 	cancels  map[int]context.CancelFunc
 	procs    map[int]*os.Process // running encoder processes, by job ID
 	pending  []Event
 }
 
-// NewQueue returns a queue that runs jobs until ctx is done. Canceling ctx
-// stops every running encode; call Close afterwards to let them clean up.
-func NewQueue(ctx context.Context, s Settings) *Queue {
+// NewQueue returns a queue that runs jobs until ctx is done, on the devices
+// found here. Canceling ctx stops every running encode; call Close
+// afterwards to let them clean up.
+func NewQueue(ctx context.Context, s Settings) *Queue { return newQueue(ctx, s, Devices()) }
+
+func newQueue(ctx context.Context, s Settings, devices []Device) *Queue {
 	return &Queue{
 		ctx:      ctx,
 		settings: s,
 		notify:   make(chan struct{}, 1),
+		devices:  devices,
+		busy:     make(map[string]int),
 		cancels:  make(map[int]context.CancelFunc),
 		procs:    make(map[int]*os.Process),
 	}
+}
+
+// Devices lists what the queue encodes on, whether or not the settings
+// turn them off.
+func (q *Queue) Devices() []Device {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return slices.Clone(q.devices)
 }
 
 // Add queues an encode of in. Its output path is chosen when it starts.
@@ -204,8 +218,8 @@ func (q *Queue) Close() {
 	q.wg.Wait()
 }
 
-// dispatchLocked starts queued jobs in the order they run until the worker
-// limit is reached. The caller must hold q.mu.
+// dispatchLocked starts queued jobs in the order they run, each on the first
+// device with room for it, until none has. The caller must hold q.mu.
 func (q *Queue) dispatchLocked() {
 	if q.paused || q.holding || q.closed || q.ctx.Err() != nil {
 		return
@@ -218,18 +232,28 @@ func (q *Queue) dispatchLocked() {
 	}
 	slices.SortStableFunc(waiting, func(a, b *Job) int { return RunOrder(*a, *b) })
 	for _, j := range waiting {
-		if q.running >= q.settings.Workers {
+		d, ok := q.freeDeviceLocked()
+		if !ok {
 			return
 		}
 		ctx, cancel := context.WithCancel(q.ctx)
 		q.cancels[j.ID] = cancel
-		q.running++
-		j.State = Running
-		j.Started = time.Now()
+		q.busy[d.ID]++
+		j.State, j.Started, j.Device = Running, time.Now(), d.Name
 		q.emitLocked(*j, "")
 		s := q.settings
-		q.wg.Go(func() { q.run(ctx, j, s) })
+		q.wg.Go(func() { q.run(ctx, j, s, d) })
 	}
+}
+
+// freeDeviceLocked is the first device with room for another job.
+func (q *Queue) freeDeviceLocked() (Device, bool) {
+	for _, d := range q.devices {
+		if q.busy[d.ID] < q.settings.Slots(d, q.devices) {
+			return d, true
+		}
+	}
+	return Device{}, false
 }
 
 // RunOrder compares two queued jobs by the order they run in: higher
@@ -239,7 +263,7 @@ func RunOrder(a, b Job) int {
 	return cmp.Or(cmp.Compare(b.Priority, a.Priority), cmp.Compare(b2i(b.Next), b2i(a.Next)))
 }
 
-func (q *Queue) run(ctx context.Context, j *Job, s Settings) {
+func (q *Queue) run(ctx context.Context, j *Job, s Settings, d Device) {
 	// Each update edits j under the lock, then tells Next about it.
 	update := func(line string, edit func()) {
 		q.mu.Lock()
@@ -247,7 +271,7 @@ func (q *Queue) run(ctx context.Context, j *Job, s Settings) {
 		edit()
 		q.emitLocked(*j, line)
 	}
-	err := encodeFile(ctx, j.Input, s, updates{
+	err := encodeFile(ctx, j.Input, s, d, updates{
 		planned: func(a Action, out string) { update("", func() { j.Action, j.Output = a, out }) },
 		started: func(p *os.Process) {
 			q.mu.Lock()
@@ -285,7 +309,7 @@ func (q *Queue) run(ctx context.Context, j *Job, s Settings) {
 	q.cancels[j.ID]() // release the context only after checking whether it was canceled
 	delete(q.cancels, j.ID)
 	delete(q.procs, j.ID)
-	q.running--
+	q.busy[d.ID]--
 	q.emitLocked(*j, "")
 	q.dispatchLocked()
 }

@@ -34,9 +34,9 @@ func TestPriorityLeavesTheFingerprintAlone(t *testing.T) {
 func TestHigherPriorityFoldersRunFirst(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := DefaultSettings()
-	s.Workers = 1
+	s.Encoders = map[string]int{"cpu": 1}
 	s.Watch = []WatchFolder{{Path: "/nonexistent/Movies", Kind: FolderMovies, Priority: 1}, {Path: "/nonexistent/TV", Kind: FolderShows}}
-	q := NewQueue(ctx, s)
+	q := newQueue(ctx, s, []Device{cpuDevice})
 	defer func() { cancel(); q.Close() }()
 
 	started := map[int]bool{}

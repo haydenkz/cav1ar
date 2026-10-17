@@ -25,10 +25,11 @@ func runDaemon(ctx context.Context, q *encode.Queue, w *encode.Watcher, batch bo
 		log.SetFlags(0) // the journal adds its own timestamps
 	}
 	s := q.Settings()
-	if err := encode.CheckEncoder(s.Encoder); err != nil {
-		return err
+	if len(q.Devices()) == 0 {
+		return encode.ErrNoEncoder
 	}
 	log.Printf("cav1ar: %s", s.Summary())
+	log.Printf("cav1ar: encoding on %s", s.DeviceSummary(q.Devices()))
 	logWatch(s)
 	srv, err := remote.Serve(q, w)
 	if err != nil {
@@ -144,9 +145,6 @@ func followSettings(ctx context.Context, q *encode.Queue, srv *remote.Server) {
 		if mod := modTime(); !mod.Equal(last) {
 			last = mod
 			s, err := config.Load()
-			if err == nil {
-				err = encode.CheckEncoder(s.Encoder)
-			}
 			if err != nil {
 				log.Printf("cav1ar: ignoring changed settings: %v", err)
 				continue
@@ -156,6 +154,7 @@ func followSettings(ctx context.Context, q *encode.Queue, srv *remote.Server) {
 				srv.SetSettings(s)
 			}
 			log.Printf("cav1ar: settings changed: %s", s.Summary())
+			log.Printf("cav1ar: encoding on %s", s.DeviceSummary(q.Devices()))
 			logWatch(s)
 		}
 	}

@@ -46,6 +46,7 @@ type Job struct {
 	Output string // where the result goes, once decided; the same as Input when nothing needed doing
 	Action Action // what the job decided the file needs, once it has
 	Step   string // what it's doing beyond that, such as "adding the preroll"
+	Device string // the name of the device it runs on, once it starts
 	State  State
 	Next   bool // queued ahead of the rest of its priority, such as a video that has just arrived
 	// Priority comes from the watched folder the video is in: jobs with a

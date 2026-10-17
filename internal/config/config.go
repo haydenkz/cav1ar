@@ -45,10 +45,30 @@ func Load() (encode.Settings, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return encode.DefaultSettings(), fmt.Errorf("%s: %w", path, err)
 	}
+	migrate(&s, data)
 	if err := s.Validate(); err != nil {
 		return encode.DefaultSettings(), fmt.Errorf("%s: %w", path, err)
 	}
 	return s, nil
+}
+
+// migrate carries over settings saved before each device got its own: one
+// encoder for everything, running some number of files at once. Those apply
+// to devices of that kind; the rest keep their defaults, unless the CPU was
+// chosen, which then stays the only one.
+func migrate(s *encode.Settings, data []byte) {
+	var old struct {
+		Encoder encode.Encoder `json:"encoder"`
+		Workers int            `json:"workers"`
+	}
+	if json.Unmarshal(data, &old) != nil || old.Encoder == "" || s.Encoders != nil {
+		return
+	}
+	s.Encoders = map[string]int{string(old.Encoder): min(max(old.Workers, 1), encode.MaxSlots)}
+	if old.Encoder == encode.EncoderCPU {
+		s.Encoders[string(encode.EncoderNVIDIA)] = 0
+		s.Encoders[string(encode.EncoderVAAPI)] = 0
+	}
 }
 
 // Save writes settings so the next run starts with them.

@@ -93,9 +93,12 @@ func joinPoint(ctx context.Context, path string, length time.Duration) (time.Dur
 	return 0, errors.New("couldn't find where the preroll ends")
 }
 
-// prerollFor returns a copy of the preroll encoded to match main, building
-// it the first time each kind of main needs one, and how long it runs.
-func prerollFor(ctx context.Context, s Settings, mainPath string, main mediaInfo, u updates) (string, time.Duration, error) {
+// prerollFor returns a copy of the preroll encoded to match main, which d
+// encoded, building it the first time each kind of main needs one, and how
+// long it runs. NVENC can match main's AV1 header more closely, so an NVIDIA
+// GPU encodes the preroll for its own results; SVT-AV1 does for the rest.
+func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main mediaInfo, u updates) (string, time.Duration, error) {
+	nvenc := d.Kind == EncoderNVIDIA
 	id, err := prerollID(s.Preroll)
 	if err != nil {
 		return "", 0, err
@@ -138,7 +141,7 @@ func prerollFor(ctx context.Context, s Settings, mainPath string, main mediaInfo
 	}
 	tenBit := strings.Contains(v.PixFmt, "10")
 	switch {
-	case s.Encoder == EncoderNVIDIA && tenBit:
+	case nvenc && tenBit:
 		vf = append(vf, "format=p010le")
 	case tenBit:
 		vf = append(vf, "format=yuv420p10le")
@@ -147,9 +150,13 @@ func prerollFor(ctx context.Context, s Settings, mainPath string, main mediaInfo
 	}
 	vf = append(vf, "setparams="+colorParams(v))
 	args = append(args, "-vf", strings.Join(vf, ","), "-frames:v", strconv.Itoa(frames))
-	if s.Encoder == EncoderNVIDIA {
+	if nvenc {
 		maxRate := nvencMaxRate(resolution(v.Width, v.Height))
-		args = append(args, "-c:v", "av1_nvenc", "-preset", "p"+strconv.Itoa(s.NVENCPreset), "-tune", "hq",
+		args = append(args, "-c:v", "av1_nvenc")
+		if d.Index > 0 { // left out for the first GPU, which keeps prerolls built before there could be more
+			args = append(args, "-gpu", strconv.Itoa(d.Index))
+		}
+		args = append(args, "-preset", "p"+strconv.Itoa(s.NVENCPreset), "-tune", "hq",
 			"-rc", "vbr", "-cq", strconv.Itoa(s.CRF), "-b:v", "0",
 			"-maxrate", strconv.Itoa(maxRate)+"M", "-bufsize", strconv.Itoa(2*maxRate)+"M",
 			"-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1", "-g", "240")
@@ -162,7 +169,7 @@ func prerollFor(ctx context.Context, s Settings, mainPath string, main mediaInfo
 			args = append(args, "-tier", strconv.Itoa(int(config[2]>>7)))
 		}
 	} else {
-		args = append(args, "-c:v", "libsvtav1", "-preset", strconv.Itoa(s.Preset), "-crf", strconv.Itoa(s.CRF))
+		args = append(args, "-c:v", "libsvtav1", "-preset", strconv.Itoa(s.Preset), "-crf", strconv.Itoa(svtCRF(s.CRF)))
 	}
 
 	audioIn := "0:a:0"
@@ -309,10 +316,10 @@ func av1Config(ctx context.Context, path string) ([]byte, error) {
 }
 
 // addPreroll writes main, with the preroll ahead of it, to out.
-func addPreroll(ctx context.Context, s Settings, main string, mainInfo mediaInfo, out string, u updates) (time.Duration, error) {
+func addPreroll(ctx context.Context, s Settings, d Device, main string, mainInfo mediaInfo, out string, u updates) (time.Duration, error) {
 	u.step("adding the preroll")
 	u.stage("adding the preroll")
-	pre, length, err := prerollFor(ctx, s, main, mainInfo, u)
+	pre, length, err := prerollFor(ctx, s, d, main, mainInfo, u)
 	if err != nil {
 		return 0, err
 	}

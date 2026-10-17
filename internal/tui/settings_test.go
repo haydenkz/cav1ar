@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 // fakeQueue is a Backend that records the settings it is given.
 type fakeQueue struct {
 	settings encode.Settings
+	devices  []encode.Device
 	saves    int
 }
 
@@ -30,6 +32,7 @@ func (f *fakeQueue) Settings() encode.Settings     { return f.settings }
 func (f *fakeQueue) SetSettings(s encode.Settings) { f.settings = s; f.saves++ }
 func (f *fakeQueue) Watching() bool                { return true }
 func (f *fakeQueue) Daemon() bool                  { return false }
+func (f *fakeQueue) Devices() []encode.Device      { return f.devices }
 
 // newTestModel is a sized model whose settings are saved under a temporary
 // folder, not the user's.
@@ -40,14 +43,6 @@ func newTestModel(t *testing.T) (Model, *fakeQueue) {
 	m := New(q)
 	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 40})
 	return m, q
-}
-
-// needEncoder skips a test that saves, since saving checks the encoder works.
-func needEncoder(t *testing.T) {
-	t.Helper()
-	if err := encode.CheckEncoder(encode.DefaultSettings().Encoder); err != nil {
-		t.Skip(err)
-	}
 }
 
 func update(m Model, msg tea.Msg) Model {
@@ -109,7 +104,6 @@ func TestEnterMovesOnAndNeverSaves(t *testing.T) {
 }
 
 func TestFoldersAreEditedInTheDraftAndSavedWithIt(t *testing.T) {
-	needEncoder(t)
 	m, q := newTestModel(t)
 	films, tv := t.TempDir(), t.TempDir()
 	m = press(m, "s", "shift+tab")
@@ -157,7 +151,6 @@ func TestEscAsksBeforeDiscardingChanges(t *testing.T) {
 
 // Saving something that can't be saved shows why, in the section to fix.
 func TestSavingABadValueOpensItsSection(t *testing.T) {
-	needEncoder(t)
 	m, q := newTestModel(t)
 	m = press(m, "s")
 	m.draft.OutDir = "/nonexistent/folder"
@@ -174,7 +167,8 @@ func TestSavingABadValueOpensItsSection(t *testing.T) {
 // Fields that don't apply aren't shown, and come back with the choice that
 // makes them apply.
 func TestFieldsFollowTheChoicesTheyDependOn(t *testing.T) {
-	m, _ := newTestModel(t)
+	m, q := newTestModel(t)
+	q.devices = testDevices
 	m = press(m, "s")
 	has := func(key string) bool {
 		for _, f := range m.sectionFields(m.section) {
@@ -184,13 +178,12 @@ func TestFieldsFollowTheChoicesTheyDependOn(t *testing.T) {
 		}
 		return false
 	}
-	m.draft.Encoder = encode.EncoderCPU
-	if !has("preset") || has("nvencPreset") {
-		t.Error("the CPU encoder should offer only the CPU presets")
-	}
-	m.draft.Encoder = encode.EncoderNVIDIA
 	if has("preset") || !has("nvencPreset") {
-		t.Error("the NVIDIA encoder should offer only its presets")
+		t.Error("with the GPU encoding and the CPU left to its default, only the NVIDIA presets should show")
+	}
+	m.draft.slots[0] = 0 // the GPU off, so the CPU takes over
+	if !has("preset") || has("nvencPreset") {
+		t.Error("with the GPU off, only the CPU presets should show")
 	}
 
 	m = press(m, "tab") // Audio
@@ -218,5 +211,44 @@ func TestStepsShowOnlyCav1arsOwnLines(t *testing.T) {
 	m = press(m, "enter")
 	if got := len(m.logLines(0)); got != 3 {
 		t.Errorf("the full log shows %d lines, want all 3", got)
+	}
+}
+
+var testDevices = []encode.Device{
+	{ID: "nvidia:0000:01:00.0", Kind: encode.EncoderNVIDIA, Name: "Test GPU"},
+	{ID: "cpu", Kind: encode.EncoderCPU, Name: "CPU"},
+}
+
+// Settings that name devices by kind, as older versions' are carried over,
+// stay as they are until a device's number is changed, which then names
+// each device by its ID.
+func TestDeviceNumbersAreSavedByID(t *testing.T) {
+	m, q := newTestModel(t)
+	q.devices = testDevices
+	q.settings.Encoders = map[string]int{"nvidia": 1}
+	m.settings = q.settings
+	m = press(m, "s")
+	if m.draft.slots[0] != 1 || m.draft.slots[1] != slotsAuto {
+		t.Fatalf("the form shows %v, want [1 auto]", m.draft.slots)
+	}
+	if m.draftChanged() {
+		t.Fatal("opening the settings counted as a change")
+	}
+	m.draft.slots[1] = 2
+	m = press(m, "ctrl+s")
+	want := map[string]int{"nvidia:0000:01:00.0": 1, "cpu": 2}
+	if !maps.Equal(q.settings.Encoders, want) {
+		t.Errorf("saved %v, want %v", q.settings.Encoders, want)
+	}
+}
+
+func TestEveryEncoderOffIsRefused(t *testing.T) {
+	m, q := newTestModel(t)
+	q.devices = testDevices
+	m = press(m, "s")
+	m.draft.slots = []int{0, 0}
+	m = press(m, "ctrl+s")
+	if q.saves != 0 || !strings.Contains(m.status, "every encoder is off") {
+		t.Errorf("%d saves, status %q; want it refused", q.saves, m.status)
 	}
 }

@@ -3,8 +3,9 @@
 Batch-encode video to AV1 from your terminal, or let it watch a library and
 keep every file in it encoded the way you like.
 
-- CPU (SVT-AV1) or GPU (NVIDIA NVENC, AMD/Intel VAAPI) encoding, with optional
-  downscaling to a maximum resolution
+- Encodes on every GPU it finds (NVIDIA NVENC, AMD/Intel VAAPI) at once, or
+  on the CPU (SVT-AV1), with one quality setting that looks about the same on
+  each, and optional downscaling to a maximum resolution
 - Opus or AAC audio, downmixing, and language filters for audio and subtitles,
   including keeping just the best audio track. A track counts as being in your
   language if it's tagged so, or untagged with a title that names it; if no
@@ -60,6 +61,24 @@ its videos as movies or shows, `+`/`-` set its priority, and `d` removes it.
 
 Settings are saved to `~/.config/cav1ar/config.json`. A running daemon picks
 up changes made in the UI.
+
+## Encoders
+
+cav1ar finds what can encode AV1 when it starts: each NVIDIA GPU (RTX
+40-series or newer), each AMD or Intel GPU that VAAPI can reach, and the CPU.
+`cav1ar -devices` lists them. Jobs go to whichever has room, so two GPUs
+work through a queue about twice as fast as one.
+
+By default each GPU encodes 2 files at once, which keeps its encoder busy
+while a job does its work on the CPU, such as checking the result. The CPU
+encodes only when no GPU does: it makes the smallest files at the same
+quality, but is many times slower. Settings → Video lists each device, to
+turn it off or give it a different number at once; `-encoders nvidia=1,cpu=0`
+does the same from the command line, by kind or by the IDs `-devices` shows.
+
+Quality is one number, 1–63 on NVENC's scale, where lower is better. The
+other encoders are set to match it, so a file looks about the same whichever
+device encoded it.
 
 ## File names
 

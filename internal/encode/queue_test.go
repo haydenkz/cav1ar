@@ -5,11 +5,14 @@ import (
 	"testing"
 )
 
+// cpuDevice stands in for whatever a test machine can encode on.
+var cpuDevice = Device{ID: "cpu", Kind: EncoderCPU, Name: "CPU"}
+
 func TestAddNextGoesAheadOfTheRest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := DefaultSettings()
-	s.Workers = 1
-	q := NewQueue(ctx, s)
+	s.Encoders = map[string]int{"cpu": 1}
+	q := newQueue(ctx, s, []Device{cpuDevice})
 	defer func() { cancel(); q.Close() }()
 
 	q.SetPaused(true)

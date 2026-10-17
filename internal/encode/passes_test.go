@@ -92,7 +92,7 @@ func TestEncodeFileKeepsEveryTrackThroughBothPasses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := encodeFile(ctx, src, s, noUpdates()); err != nil {
+	if err := encodeFile(ctx, src, s, cpuDevice, noUpdates()); err != nil {
 		t.Fatal(err)
 	}
 	info, err := probe(ctx, p.out)
@@ -179,7 +179,7 @@ func TestEncodeFileLogsItsStages(t *testing.T) {
 			stages = append(stages, stage)
 		}
 	}
-	if err := encodeFile(context.Background(), src, testSettings(outDir), u); err != nil {
+	if err := encodeFile(context.Background(), src, testSettings(outDir), cpuDevice, u); err != nil {
 		t.Fatal(err)
 	}
 	want := []string{

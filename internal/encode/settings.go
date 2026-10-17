@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -94,12 +95,14 @@ func ParseWatchFolder(s string) WatchFolder {
 // Settings control how jobs are encoded. A job uses the settings in effect
 // when it starts.
 type Settings struct {
-	Encoder     Encoder `json:"encoder"`
-	CRF         int     `json:"crf"`                  // quality, 1–63 like SVT-AV1's CRF; lower is better
-	Preset      int     `json:"preset"`               // CPU speed, 0 (slowest, best) to 13 (fastest) like SVT-AV1's
-	NVENCPreset int     `json:"nvenc_preset"`         // NVIDIA speed, 1 (fastest) to 7 (slowest, best) like NVENC's p1–p7
-	MaxHeight   int     `json:"max_height,omitempty"` // scale bigger video down to fit this height and its 16:9 width; 0 keeps the size
-	Workers     int     `json:"workers"`              // encodes to run at once
+	// Encoders says how many files a device encodes at once, by its ID or
+	// by its kind (cpu, nvidia or vaapi); 0 turns it off. Devices it doesn't
+	// mention get the default; see Slots.
+	Encoders    map[string]int `json:"encoders,omitempty"`
+	CRF         int            `json:"crf"`                  // quality, 1–63 on NVENC's scale, which the other encoders are set to match; lower is better
+	Preset      int            `json:"preset"`               // CPU speed, 0 (slowest, best) to 13 (fastest) like SVT-AV1's
+	NVENCPreset int            `json:"nvenc_preset"`         // NVIDIA speed, 1 (fastest) to 7 (slowest, best) like NVENC's p1–p7
+	MaxHeight   int            `json:"max_height,omitempty"` // scale bigger video down to fit this height and its 16:9 width; 0 keeps the size
 
 	AudioCodec  AudioCodec  `json:"audio_codec"`       // what audio is encoded to, unless AudioKbps is AudioCopy
 	AudioKbps   int         `json:"audio_kbps"`        // bitrate, or AudioCopy or AudioAuto
@@ -133,11 +136,9 @@ var MaxHeights = []int{2160, 1440, 1080, 720, 480}
 
 func DefaultSettings() Settings {
 	return Settings{
-		Encoder:      EncoderCPU,
 		CRF:          30,
 		Preset:       6,
 		NVENCPreset:  6,
-		Workers:      1,
 		AudioCodec:   Opus,
 		Language:     "eng",
 		AudioTracks:  KeepAll,
@@ -150,10 +151,7 @@ func DefaultSettings() Settings {
 // has one, including keeping originals. Personal settings are kept: language,
 // release group, video size, and where files go.
 func (s Settings) Recommended() Settings {
-	// One SVT-AV1 encode keeps about 16 threads busy, so more at once only
-	// pays off on bigger CPUs.
-	s.Encoder, s.CRF, s.Preset, s.Workers = EncoderCPU, 30, 6, max(1, runtime.NumCPU()/16)
-	s.NVENCPreset = 6
+	s.Encoders, s.CRF, s.Preset, s.NVENCPreset = nil, 30, 6, 6
 	s.AudioCodec, s.AudioKbps, s.Downmix = Opus, AudioAuto, false
 	s.AudioTracks, s.Subtitles, s.TidySubs = KeepAll, KeepAll, true
 	s.StripMetadata, s.Title = true, "{title} ({year}) {episode}"
@@ -164,9 +162,12 @@ func (s Settings) Recommended() Settings {
 var languageCode = regexp.MustCompile(`^[a-zA-Z]{2,3}$`)
 
 func (s Settings) Validate() error {
+	for id, n := range s.Encoders {
+		if n < 0 || n > MaxSlots {
+			return fmt.Errorf("%s: encodes at once must be between 0 and %d, not %d", id, MaxSlots, n)
+		}
+	}
 	switch {
-	case !slices.Contains(Encoders, s.Encoder):
-		return fmt.Errorf("unknown encoder %q", s.Encoder)
 	case s.CRF < 1 || s.CRF > 63:
 		return fmt.Errorf("crf must be between 1 and 63, not %d", s.CRF)
 	case s.Preset < 0 || s.Preset > 13:
@@ -175,8 +176,6 @@ func (s Settings) Validate() error {
 		return fmt.Errorf("NVIDIA preset must be between 1 and 7, not %d", s.NVENCPreset)
 	case s.MaxHeight != 0 && s.MaxHeight < 144:
 		return fmt.Errorf("maximum height must be at least 144, or 0 to keep the size, not %d", s.MaxHeight)
-	case s.Workers < 1:
-		return fmt.Errorf("workers must be at least 1, not %d", s.Workers)
 	case s.AudioCodec != Opus && s.AudioCodec != AAC:
 		return fmt.Errorf("unknown audio codec %q", s.AudioCodec)
 	case s.AudioKbps < AudioAuto:
@@ -198,6 +197,38 @@ func (s Settings) Validate() error {
 		}
 	}
 	return nil
+}
+
+// MaxSlots is the most files a device can be set to encode at once.
+const MaxSlots = 16
+
+// gpuSlots is how many files a GPU encodes at once by default. One encode
+// keeps its encoder busy, apart from the gaps while a job does its work on
+// the CPU, such as checking the result; a second fills those gaps.
+const gpuSlots = 2
+
+// Slots is how many files d encodes at once, given every device there is:
+// what the settings say for d, or else for its kind, or else the default,
+// which is 2 for a GPU, and for the CPU, none while a GPU encodes, since it
+// is far slower. 0 means d is off.
+func (s Settings) Slots(d Device, devices []Device) int {
+	if n, ok := s.Encoders[d.ID]; ok {
+		return n
+	}
+	if n, ok := s.Encoders[string(d.Kind)]; ok {
+		return n
+	}
+	if d.GPU() {
+		return gpuSlots
+	}
+	for _, other := range devices {
+		if other.GPU() && s.Slots(other, devices) > 0 {
+			return 0
+		}
+	}
+	// One SVT-AV1 encode keeps about 16 threads busy, so more at once only
+	// pays off on bigger CPUs.
+	return max(1, runtime.NumCPU()/16)
 }
 
 // WatchPaths lists the watched folders' paths.
@@ -237,16 +268,38 @@ func (s Settings) outputPath(in string, r release) string {
 	return filepath.Join(dir, fileName(s.NameTemplate, r))
 }
 
-// Summary is a one-line description, e.g. "crf 30 · preset 6 · opus 128k".
+// DeviceSummary says what each device does under s, e.g. "GeForce RTX 4070
+// 2 at once p4 · CPU off".
+func (s Settings) DeviceSummary(devices []Device) string {
+	if len(devices) == 0 {
+		return "nothing found that can encode AV1"
+	}
+	var parts []string
+	for _, d := range devices {
+		n := s.Slots(d, devices)
+		switch {
+		case n == 0:
+			parts = append(parts, d.Name+" off")
+		case d.Kind == EncoderNVIDIA:
+			parts = append(parts, fmt.Sprintf("%s %d at once p%d", d.Name, n, s.NVENCPreset))
+		case d.Kind == EncoderCPU:
+			parts = append(parts, fmt.Sprintf("%s %d at once preset %d", d.Name, n, s.Preset))
+		default:
+			parts = append(parts, fmt.Sprintf("%s %d at once", d.Name, n))
+		}
+	}
+	return strings.Join(parts, " · ")
+}
+
+// Summary is a one-line description, e.g. "crf 30 · ≤1080p · opus 128k".
 func (s Settings) Summary() string {
 	parts := []string{fmt.Sprintf("crf %d", s.CRF)}
-	switch s.Encoder {
-	case EncoderCPU:
-		parts = append(parts, fmt.Sprintf("preset %d", s.Preset))
-	case EncoderNVIDIA:
-		parts = append([]string{"nvidia gpu"}, append(parts, fmt.Sprintf("p%d", s.NVENCPreset))...)
-	default:
-		parts = append([]string{strings.ToLower(s.Encoder.String())}, parts...)
+	for _, id := range slices.Sorted(maps.Keys(s.Encoders)) {
+		if n := s.Encoders[id]; n == 0 {
+			parts = append(parts, id+" off")
+		} else {
+			parts = append(parts, fmt.Sprintf("%s %d at once", id, n))
+		}
 	}
 	if s.MaxHeight > 0 {
 		parts = append(parts, fmt.Sprintf("≤%dp", s.MaxHeight))
@@ -285,9 +338,6 @@ func (s Settings) Summary() string {
 	}
 	if s.DeleteOriginal {
 		parts = append(parts, "deletes originals")
-	}
-	if s.Workers > 1 {
-		parts = append(parts, fmt.Sprintf("%d at once", s.Workers))
 	}
 	if s.Preroll != "" {
 		parts = append(parts, "preroll")

@@ -53,8 +53,9 @@ type Backend interface {
 	Next() []encode.Event
 	Settings() encode.Settings
 	SetSettings(s encode.Settings)
-	Watching() bool // whether this queue's cav1ar is the one watching folders
-	Daemon() bool   // whether the queue is a daemon's, which carries on once the UI closes
+	Devices() []encode.Device // what the queue encodes on
+	Watching() bool           // whether this queue's cav1ar is the one watching folders
+	Daemon() bool             // whether the queue is a daemon's, which carries on once the UI closes
 }
 
 // Local is a queue of the UI's own, whose folders w watches.
@@ -256,7 +257,7 @@ func (m *Model) queueKey(msg tea.KeyPressMsg) tea.Cmd {
 		m.openPicker(pickAdd)
 		return m.picker.Init()
 	case key.Matches(msg, m.keys.Settings):
-		return m.openSettings(newDraft(m.settings), m.section)
+		return m.openSettings(newDraft(m.settings, m.queue.Devices()), m.section)
 	case key.Matches(msg, m.keys.Pause):
 		m.holding = !m.holding
 		m.queue.SetHolding(m.holding)

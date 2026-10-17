@@ -82,6 +82,7 @@ func (s subOut) label() string {
 type plan struct {
 	in       string
 	settings Settings
+	device   Device // what encodes the video, once the job has one
 	folder   WatchFolder
 	info     mediaInfo
 
@@ -686,7 +687,7 @@ func (p *plan) hasSide() bool { return len(p.subs) > 0 || len(p.fonts) > 0 }
 func (p *plan) encodeArgs(av, side string, hwDecode bool) []string {
 	var beforeInput, video []string
 	if p.encodeVideo {
-		beforeInput, video = videoArgs(p.settings, p.video, p.width, p.height, hwDecode)
+		beforeInput, video = videoArgs(p.settings, p.device, p.video, p.width, p.height, hwDecode)
 	} else {
 		video = []string{"-c:v", "copy"}
 	}
