@@ -17,8 +17,8 @@ import (
 type Action string
 
 const (
-	ActionNone   Action = "none"   // nothing: it already matches
-	ActionRename Action = "rename" // only its name is wrong
+	ActionNone   Action = "none"   // nothing: it already matches, or only its name doesn't and the settings keep originals
+	ActionRename Action = "rename" // only its name is wrong, and the settings let the original change
 	ActionRetag  Action = "retag"  // only its tags, track titles, flags or chapters are wrong; fixed in place
 	ActionRemux  Action = "remux"  // tracks to drop, audio to encode or tags to fix; the video is copied
 	ActionEncode Action = "encode" // the video is encoded
@@ -97,6 +97,8 @@ type plan struct {
 	out       string   // where the result goes
 	notes     []string // choices worth showing the user, such as tracks left out
 	checkSubs bool     // subtitles need tidying before the plan is final
+	nameKept  bool     // the settings would rename the file, but keep originals as they are
+	links     uint64   // how many hard links the source has, or 0 if unknown
 
 	prerollHave string        // ID of the preroll the source starts with, if any
 	prerollIn   time.Duration // how long that preroll runs, which the job cuts off
@@ -105,6 +107,7 @@ type plan struct {
 
 func newPlan(in string, s Settings, info mediaInfo) (*plan, error) {
 	p := &plan{in: in, settings: s, folder: s.folderOf(in), info: info}
+	_, p.links, _ = identify(in)
 	if p.prerollHave, p.prerollIn = prerollOf(info); p.prerollIn > 0 {
 		// Judge the source by what follows its preroll.
 		p.info.Streams = slices.Clone(info.Streams)
@@ -551,10 +554,17 @@ const (
 )
 
 // retaggable reports whether the file can be brought into line by editing
-// its metadata in place: it's Matroska, everything wrong with it is
-// metadata, MKVToolNix is installed, and the settings let the original be
-// changed rather than kept beside a copy.
-func (p *plan) retaggable() bool {
+// its metadata in place: fixableInPlace, and nothing else links to it. A
+// file with other hard links, as an import linked from a download that is
+// still seeding has, would have them all edited too, so it's remuxed into
+// a new file instead.
+func (p *plan) retaggable() bool { return p.links <= 1 && p.fixableInPlace() }
+
+// fixableInPlace reports whether editing the file's metadata in place would
+// bring it into line: it's Matroska, everything wrong with it is metadata,
+// MKVToolNix is installed, and the settings let the original be changed
+// rather than kept beside a copy.
+func (p *plan) fixableInPlace() bool {
 	if !p.settings.DeleteOriginal || filepath.Dir(p.out) != filepath.Dir(p.in) ||
 		!strings.EqualFold(filepath.Ext(p.in), ".mkv") || !haveMKVToolNix() {
 		return false
@@ -608,17 +618,21 @@ func (p *plan) action() Action {
 		return ActionNone
 	case filepath.Dir(p.out) != filepath.Dir(p.in):
 		return ActionRemux // a copy in the output folder
+	case !p.settings.DeleteOriginal:
+		return ActionNone // renaming would change the original, which the settings keep as it is
 	}
 	return ActionRename
 }
 
-// Encodes take two passes. ffmpeg has exited cleanly on encodes whose audio
-// stopped an hour early: with the video, audio and subtitles in one pass, it
-// can end an audio track partway through without saying so. So the encoding
-// pass reads the source once and writes the video and audio to one file and
-// the subtitles and attachments to another, and the remuxing pass puts them
-// together with the flags and tags the settings want. If the encoding pass
-// still cuts the audio short, a pass of its own encodes the audio again.
+// A job that writes a new file, whether encoding the video or copying it,
+// does so in at least two ffmpeg passes. ffmpeg has exited cleanly on
+// encodes whose audio stopped an hour early: with the video, audio and
+// subtitles in one pass, it can end an audio track partway through without
+// saying so. So the encoding pass reads the source once and writes the
+// video and audio to one file and the subtitles and attachments to another,
+// and the remuxing pass puts them together with the flags and tags the
+// settings want, or joins them onto the preroll. If the encoding pass still
+// cuts the audio short, a pass of its own encodes the audio again first.
 
 // inputArgs opens the source for a pass that reads it, cutting off any
 // preroll it starts with. beforeInput are the video decoder's options.

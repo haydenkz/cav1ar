@@ -2,15 +2,16 @@ package encode
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -85,6 +86,13 @@ func prepare(ctx context.Context, in string, s Settings, log func(string)) (*pla
 		}
 		p.tidySubs(stats)
 	}
+	if p.action() == ActionNone && p.out != in {
+		p.note("Not renaming it to %s, since the settings keep originals as they are", filepath.Base(p.out))
+		p.out, p.nameKept = in, true
+	}
+	if p.action() == ActionRemux && p.fixableInPlace() {
+		p.note("Remuxing it rather than fixing it in place, since other hard links to it would change too")
+	}
 	return p, nil
 }
 
@@ -92,6 +100,13 @@ func prepare(ctx context.Context, in string, s Settings, log func(string)) (*pla
 // or renaming it, or leaving it be if it already matches.
 func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates) error {
 	u.stage("checking the file")
+	// The source as the job found it, so that something else changing it
+	// meanwhile, such as a download replacing it, is noticed before the job
+	// renames, edits, replaces or deletes it.
+	source, _, err := identify(in)
+	if err != nil {
+		return err
+	}
 	p, err := prepare(ctx, in, s, u.log)
 	if err != nil {
 		return err
@@ -103,11 +118,23 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 	action, out := p.action(), p.out
 	u.planned(action, out)
 
-	switch action {
-	case ActionNone:
-		u.log("cav1ar: nothing to do; it already matches the settings")
+	if action == ActionNone {
+		if p.nameKept {
+			u.note("not renamed, as originals are kept")
+		} else {
+			u.log("cav1ar: nothing to do; it already matches the settings")
+		}
 		return nil
-	case ActionRename:
+	}
+	unreserve, err := reserve(out)
+	if err != nil {
+		return err
+	}
+	defer unreserve()
+	if action == ActionRename {
+		if !unchanged(in, source) {
+			return errChanged
+		}
 		if err := renameNoReplace(in, out); err != nil {
 			return err
 		}
@@ -129,15 +156,19 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 	}
 	if action == ActionRetag {
 		u.stage("fixing the tags in place")
-		err := retag(ctx, p)
-		if err == nil && out != in {
-			err = renameNoReplace(in, out)
+		if !unchanged(in, source) {
+			return errChanged
 		}
+		err := retag(ctx, p)
 		if err == nil {
 			u.log("cav1ar: fixed the tags in place, without rewriting the file")
-			if out != in {
-				u.log("cav1ar: renamed it to " + filepath.Base(out))
+			if out == in {
+				return nil
 			}
+			if err := renameNoReplace(in, out); err != nil {
+				return fmt.Errorf("its tags were fixed in place, but it couldn't be renamed: %w", err)
+			}
+			u.log("cav1ar: renamed it to " + filepath.Base(out))
 			return nil
 		}
 		if ctx.Err() != nil {
@@ -146,6 +177,11 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 		u.log("cav1ar: couldn't fix the tags in place, so remuxing it instead: " + err.Error())
 		action = ActionRemux
 		u.planned(action, out)
+		// The retag's own edits change the file, if they got as far as
+		// the check after them.
+		if source, _, err = identify(in); err != nil {
+			return err
+		}
 	}
 	// The passes' files are only intermediates, so keep them off the
 	// library's storage, which then only reads the source and writes the
@@ -172,6 +208,9 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 	defer release()
 	defer os.Remove(tmp) // gone already, once the result is in place
 	err = encodeAndRemux(ctx, p, action, tmp, passWork, u)
+	// Canceling stops the job up to here. Past here the result goes in
+	// place, which a cancel landing meanwhile doesn't undo, so the job
+	// doesn't return one.
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -180,6 +219,10 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 	}
 	if out == in {
 		u.stage("replacing the original")
+		if !unchanged(in, source) {
+			return errors.New("something else changed the original while the job ran, " +
+				"so it was kept and the result dropped")
+		}
 		if err := os.Rename(tmp, out); err != nil {
 			return err
 		}
@@ -190,15 +233,45 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 	if err := renameNoReplace(tmp, out); err != nil {
 		return err
 	}
-	if s.DeleteOriginal {
-		if err := os.Remove(in); err != nil {
-			u.log("cav1ar: couldn't delete the original: " + err.Error())
-			u.note("original not deleted")
-		} else {
-			u.log("cav1ar: deleted the original, " + in)
-		}
+	if !s.DeleteOriginal {
+		return nil
+	}
+	if !unchanged(in, source) {
+		u.log("cav1ar: something else changed the original while the job ran, so it was kept beside the result")
+		u.note("original changed, not deleted")
+	} else if err := os.Remove(in); err != nil {
+		u.log("cav1ar: couldn't delete the original: " + err.Error())
+		u.note("original not deleted")
+	} else {
+		u.log("cav1ar: deleted the original, " + in)
 	}
 	return nil
+}
+
+// errChanged is a job's error when something else changed its source after
+// it started, before it renamed or edited it.
+var errChanged = errors.New("something else changed the file while the job ran, so it was left as it is")
+
+var (
+	outputsMu sync.Mutex
+	outputs   = map[string]bool{} // where running jobs put their results
+)
+
+// reserve claims out for a job's result until release is called. A second
+// job planning the same result fails at the start, rather than at the end
+// when the first one's result is in its way.
+func reserve(out string) (release func(), err error) {
+	outputsMu.Lock()
+	defer outputsMu.Unlock()
+	if outputs[out] {
+		return nil, fmt.Errorf("another job is already writing %s", filepath.Base(out))
+	}
+	outputs[out] = true
+	return func() {
+		outputsMu.Lock()
+		defer outputsMu.Unlock()
+		delete(outputs, out)
+	}, nil
 }
 
 // assembling names the stage that copies the encoding pass's files into one,
@@ -358,28 +431,96 @@ func runFFmpeg(ctx context.Context, args []string, duration time.Duration, rate 
 	u.started(cmd.Process)
 
 	var (
-		wg   sync.WaitGroup
-		last string // last stderr line, which is usually the reason for a failure
+		wg  sync.WaitGroup
+		why ffmpegFailure
 	)
 	wg.Go(func() {
-		sc := bufio.NewScanner(stderr)
-		for sc.Scan() {
-			if line := strings.TrimRight(sc.Text(), " \r"); line != "" {
-				last = strings.TrimSpace(line)
+		eachLine(stderr, func(line string) {
+			if line = strings.TrimRight(line, " \r"); line != "" {
+				why.add(line)
 				u.log(line)
 			}
-		}
+		})
 	})
 	readProgress(stdout, duration, rate, u.progress)
 	wg.Wait()
 
 	if err := cmd.Wait(); err != nil {
-		if last != "" && ctx.Err() == nil {
-			return errors.New(last)
+		if reason := why.reason(); reason != "" && ctx.Err() == nil {
+			return errors.New(reason)
 		}
 		return fmt.Errorf("ffmpeg: %w", err)
 	}
 	return nil
+}
+
+// ffmpegFailure picks out of ffmpeg's output the line that best says why it
+// failed. On a failure partway through, the cause comes before lines that
+// don't say, such as its closing statistics and "Conversion failed!", so
+// that is the last line that reads as an error, or failing that the last
+// line that isn't one of those.
+type ffmpegFailure struct {
+	last, lastError string
+}
+
+var (
+	// ffmpegTrailer matches what ffmpeg writes after the cause of a failure:
+	// its threads ending with the error already given, its statistics, and
+	// "Conversion failed!".
+	ffmpegTrailer = regexp.MustCompile(`^(Conversion failed!$|Task finished with error code|Terminating thread with return code|` +
+		`frame=|size=|video:\S+ audio:\S+ )`)
+	errorWords    = regexp.MustCompile(`(?i)error|fail|invalid|unsupported|not found|could not|cannot|can't|unable|denied|no space`)
+	ffmpegContext = regexp.MustCompile(`^\[[^\]]*\] `)     // what a line is about, as in "[out#0/matroska] "
+	ffmpegAddress = regexp.MustCompile(` @ 0x[0-9a-f]+\]`) // after the context, which says nothing to the user
+)
+
+func (f *ffmpegFailure) add(line string) {
+	line = ffmpegAddress.ReplaceAllString(strings.TrimSpace(line), "]")
+	msg := ffmpegContext.ReplaceAllString(line, "")
+	switch {
+	case msg == "" || ffmpegTrailer.MatchString(msg):
+	case errorWords.MatchString(msg):
+		f.last, f.lastError = line, line
+	default:
+		f.last = line
+	}
+}
+
+// reason is the line picked, cut short if it's long, or "" for none.
+func (f *ffmpegFailure) reason() string {
+	reason := cmp.Or(f.lastError, f.last)
+	if len(reason) > maxReason {
+		reason = strings.TrimSpace(cutBytes(reason, maxReason)) + "…"
+	}
+	return reason
+}
+
+// maxReason is the most of a line of ffmpeg's output a job's error shows.
+const maxReason = 300
+
+// maxLine is the longest line of ffmpeg's output read whole. Only the start
+// of a longer one is kept.
+const maxLine = 64 << 10
+
+// eachLine calls fn with each line r gives, without its line ending, until
+// r ends. Where bufio.Scanner stops at a line too long for it, eachLine
+// cuts it short and carries on: ffmpeg waits for its output to be read, so
+// leaving it unread would stall the job.
+func eachLine(r io.Reader, fn func(string)) {
+	br := bufio.NewReaderSize(r, maxLine)
+	for {
+		b, err := br.ReadSlice('\n')
+		line := string(b)
+		for errors.Is(err, bufio.ErrBufferFull) { // skip the rest of a long line
+			_, err = br.ReadSlice('\n')
+		}
+		if line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"); line != "" || err == nil {
+			fn(line)
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // verify checks a result before it replaces anything: it must have AV1
@@ -518,9 +659,11 @@ func renameNoReplace(from, to string) error {
 	return nil
 }
 
+// exists reports whether something is at path. A path that can't be looked
+// at, such as one with too long a name, doesn't count.
 func exists(path string) bool {
 	_, err := os.Lstat(path)
-	return !errors.Is(err, fs.ErrNotExist)
+	return err == nil
 }
 
 // readProgress parses ffmpeg's -progress output, a stream of key=value blocks
@@ -531,11 +674,10 @@ func exists(path string) bool {
 func readProgress(r io.Reader, dur time.Duration, rate float64, report func(progress)) {
 	p := progress{duration: dur}
 	frames := dur.Seconds() * rate // expected, or 0 if unknown
-	sc := bufio.NewScanner(r)
-	for sc.Scan() {
-		k, v, ok := strings.Cut(sc.Text(), "=")
+	eachLine(r, func(line string) {
+		k, v, ok := strings.Cut(line, "=")
 		if !ok {
-			continue
+			return
 		}
 		v = strings.TrimSpace(v)
 		switch k {
@@ -561,5 +703,5 @@ func readProgress(r io.Reader, dur time.Duration, rate float64, report func(prog
 		case "progress":
 			report(p)
 		}
-	}
+	})
 }
