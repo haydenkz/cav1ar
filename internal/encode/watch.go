@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -17,7 +18,9 @@ import (
 
 // watchInterval is how often watched folders are scanned. A new or changed
 // video is queued once it looks the same on two scans in a row, so a file
-// still being copied in is never picked up half-finished.
+// still being copied in waits until it stops growing. A copy that stalls for
+// longer than this looks finished, though, so it's safest to move videos in
+// once they're whole.
 const watchInterval = 10 * time.Second
 
 // staleTemp is how long a result being written can go untouched before a
@@ -40,15 +43,19 @@ const noteArrived = "arrived"
 
 // Watcher keeps the videos under a Queue's Settings.Watch folders, including
 // in subfolders, matching the settings: it queues the ones that don't, as
-// they arrive. Only one cav1ar watches at a time: the others wait and take
-// over if it stops, so nothing is handled twice.
+// they arrive. Of the cav1ars on one machine sharing a state directory, only
+// one watches at a time: the others wait and take over if it stops. The lock
+// that decides this is a file in the state directory, so it doesn't stop
+// cav1ars on other machines, or with state kept elsewhere, from handling the
+// same videos.
 type Watcher struct {
 	q           *Queue
 	state       string   // the state database
 	db          *stateDB // open while this Watcher is the one watching
 	lock        *os.File // held while this Watcher is the one watching
 	active      atomic.Bool
-	retryFailed bool // retry videos whose jobs failed
+	retryFailed bool          // retry videos whose jobs failed
+	done        chan struct{} // closed once Watch has stopped and saved
 
 	// Saved in the state database between runs.
 	settings string               // fingerprint of the settings the files were checked against
@@ -56,13 +63,19 @@ type Watcher struct {
 	files    map[string]fileState // what is known about each video
 	dirty    map[string]bool      // files changed since they were last saved
 
-	waiting  map[string]fileState // new or changed videos, as they looked on the last scan
-	recorded map[int]time.Time    // jobs whose outcome is in files, and when they finished
-	requeued map[string]bool      // videos found to need work on an earlier run, queued again on this one
+	scans    int                 // how many scans this Watcher has started
+	waiting  map[string]sighting // new or changed videos, as a scan last saw them
+	requeued map[string]bool     // videos found to need work on an earlier run, queued again on this one
+
+	// Jobs whose outcome is in files and the history, and when they
+	// finished. It lasts as long as the Watcher, not just while it watches,
+	// so stopping watching and starting again doesn't record jobs twice.
+	recorded map[int]time.Time
 
 	// Videos changed after this arrived since the watcher last looked, and
-	// go ahead of the rest: the end of the last run's last scan, or the
-	// start of this run if there wasn't one.
+	// go ahead of the rest: when the last run last saved what it knew, which
+	// is as it stopped unless it stopped abruptly, or the start of this run
+	// if there wasn't one.
 	arrivedAfter time.Time
 
 	saved, results atomic.Int64 // totals of every finished job that rewrote a file; see stateDB.totals
@@ -101,15 +114,23 @@ func statFile(path string) (fileState, bool) {
 
 func (f fileState) same(g fileState) bool { return f.Size == g.Size && f.Mod == g.Mod }
 
+// sighting is how a new or changed video looked, and which scan saw it.
+type sighting struct {
+	file fileState
+	scan int
+}
+
 // Watch scans q's watched folders until ctx is done. Videos already in a
 // folder when it is first watched are left alone, unless the settings say
 // otherwise. What is known about each video is kept in the state database at
 // state, so one that arrives while cav1ar is closed is still picked up next
 // time, and one already checked isn't read again until it or the settings
-// change. retryFailed gives videos whose jobs failed another go.
+// change. retryFailed gives videos whose jobs failed another go. Call Wait
+// once ctx is done to let it finish.
 func Watch(ctx context.Context, q *Queue, state string, retryFailed bool) *Watcher {
-	w := &Watcher{q: q, state: state, retryFailed: retryFailed}
+	w := newWatcher(q, state, retryFailed)
 	go func() {
+		defer close(w.done)
 		defer func() {
 			if w.lock != nil {
 				w.recordJobs(ctx) // those that finished since the last scan
@@ -129,6 +150,15 @@ func Watch(ctx context.Context, q *Queue, state string, retryFailed bool) *Watch
 	}()
 	return w
 }
+
+func newWatcher(q *Queue, state string, retryFailed bool) *Watcher {
+	return &Watcher{q: q, state: state, retryFailed: retryFailed, done: make(chan struct{}), recorded: map[int]time.Time{}}
+}
+
+// Wait blocks until the Watcher has stopped, once Watch's ctx is done, and
+// has recorded the jobs that finished and saved what it knows. Closing the
+// queue first lets the jobs it stops finish before that.
+func (w *Watcher) Wait() { <-w.done }
 
 // Active reports whether this Watcher is the one watching folders, as
 // opposed to another cav1ar, such as a daemon.
@@ -177,20 +207,23 @@ func (w *Watcher) acquire() bool {
 		w.saved.Store(saved)
 		w.results.Store(int64(results))
 	}
-	w.waiting, w.recorded = map[string]fileState{}, map[int]time.Time{}
+	w.waiting = map[string]sighting{}
 	for path, f := range w.files {
 		if f.Status == fileFailed && w.retryFailed {
 			w.forgetFile(path)
 		}
 	}
-	for _, f := range w.q.Settings().Watch {
+	s := w.q.Settings()
+	for _, f := range s.Watch {
 		removeStaleTemps(f.Path)
 	}
 	if dir, err := workDir(); err == nil {
 		removeStaleTemps(dir)
 	}
-	if dir := w.q.Settings().WorkerDir; dir != "" {
-		removeStaleTemps(dir)
+	for _, dir := range []string{s.OutDir, s.WorkerDir} {
+		if dir != "" {
+			removeStaleTemps(dir)
+		}
 	}
 	return true
 }
@@ -234,14 +267,16 @@ func (w *Watcher) scan(ctx context.Context) {
 		}
 	}
 
+	// scanned holds the folders this scan can tell which videos are gone
+	// from.
 	scanned, present := map[string]bool{}, map[string]bool{}
 	checked := 0
+	w.scans++
 	for _, folder := range s.Watch {
-		videos, err := FindVideos(folder.Path)
+		videos, whole, err := walkVideos(folder.Path)
 		if err != nil {
 			continue // offline or missing; try again next scan
 		}
-		scanned[folder.Path] = true
 		leaveAlone := !w.folders[folder.Path] && !s.WatchExisting
 		for _, v := range videos {
 			if ctx.Err() != nil {
@@ -266,9 +301,13 @@ func (w *Watcher) scan(ctx context.Context) {
 				changed = true
 				continue
 			}
-			if last, ok := w.waiting[v]; !ok || !last.same(now) {
-				w.waiting[v] = now // new or changed: wait until it stops changing
+			last, ok := w.waiting[v]
+			if !ok || !last.file.same(now) {
+				w.waiting[v] = sighting{now, w.scans} // new or changed: wait until it stops changing
 				continue
+			}
+			if last.scan == w.scans {
+				continue // seen already on this scan, through a watched folder inside another
 			}
 			delete(w.waiting, v)
 			now.Status = fileOK
@@ -287,11 +326,20 @@ func (w *Watcher) scan(ctx context.Context) {
 				w.save()
 			}
 		}
-		w.folders[folder.Path] = true
+		// A subfolder that couldn't be read may hold videos this scan
+		// missed, so the folder isn't taken as scanned until a scan reads
+		// all of it: until then, videos already there are still left alone,
+		// and those missing aren't taken to be gone. Nor are those missing
+		// from a folder that came back empty, which may be a network share
+		// that isn't mounted.
+		if whole {
+			w.folders[folder.Path] = true
+			scanned[folder.Path] = len(videos) > 0
+		}
 	}
 
 	// Forget videos that are gone, and folders no longer watched, so the
-	// state file doesn't grow forever.
+	// state database doesn't grow forever.
 	for path := range w.files {
 		if !present[path] && (scanned[folderPath(s, path)] || folderPath(s, path) == "") {
 			w.forgetFile(path)
@@ -370,8 +418,11 @@ func (w *Watcher) recordJobs(ctx context.Context) bool {
 		}
 	}
 	for _, j := range w.q.Jobs() {
-		if !j.State.Finished() || w.recorded[j.ID].Equal(j.Finished) {
+		if !j.State.Finished() {
 			continue
+		}
+		if at, ok := w.recorded[j.ID]; ok && at.Equal(j.Finished) {
+			continue // recorded already; a retry finishes at another time
 		}
 		w.recorded[j.ID] = j.Finished
 		switch j.State {
@@ -385,7 +436,9 @@ func (w *Watcher) recordJobs(ctx context.Context) bool {
 			mark(j.Input, fileFailed, j.Err.Error())
 			record(j, "failed")
 		case Canceled:
-			if ctx.Err() == nil { // canceled by the user, not by cav1ar stopping
+			// Canceled by the user, not by cav1ar stopping, which leaves
+			// queued jobs be: only the user cancels a job before it starts.
+			if ctx.Err() == nil || j.Started.IsZero() {
 				mark(j.Input, fileLeft, "canceled")
 				record(j, "canceled")
 			}
@@ -464,6 +517,31 @@ func (w *Watcher) save() {
 		return
 	}
 	clear(w.dirty)
+}
+
+// walkVideos finds the videos under root as FindVideos does, and also
+// reports whether it read every folder: one it couldn't read may hold videos
+// it missed. An error means it couldn't read root itself.
+func walkVideos(root string) (videos []string, whole bool, err error) {
+	whole = true
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return err
+			}
+			whole = false
+			return nil
+		}
+		hidden := path != root && strings.HasPrefix(d.Name(), ".")
+		switch {
+		case d.IsDir() && hidden:
+			return filepath.SkipDir
+		case !d.IsDir() && !hidden && IsVideo(path):
+			videos = append(videos, path)
+		}
+		return nil
+	})
+	return videos, whole, err
 }
 
 // removeStaleTemps deletes results left half-written under root by a cav1ar

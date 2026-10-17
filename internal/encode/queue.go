@@ -84,12 +84,15 @@ func (q *Queue) Add(in string) { q.add(in, false) }
 func (q *Queue) AddNext(in string) { q.add(in, true) }
 
 func (q *Queue) add(in string, next bool) {
+	// Stat before taking the lock: on a network mount that has hung, it
+	// would otherwise hold up the whole queue, and every UI showing it.
+	var size int64
+	if fi, err := os.Stat(in); err == nil {
+		size = fi.Size()
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	j := &Job{ID: len(q.jobs), Input: in, State: Queued, Next: next, Priority: q.settings.priorityOf(in)}
-	if fi, err := os.Stat(in); err == nil {
-		j.InSize = fi.Size()
-	}
+	j := &Job{ID: len(q.jobs), Input: in, InSize: size, State: Queued, Next: next, Priority: q.settings.priorityOf(in)}
 	q.jobs = append(q.jobs, j)
 	q.emitLocked(*j, "")
 	q.dispatchLocked()
@@ -103,7 +106,7 @@ func (q *Queue) Cancel(id int) {
 	switch {
 	case j == nil:
 	case j.State == Queued:
-		j.State = Canceled
+		j.State, j.Finished = Canceled, time.Now()
 		q.emitLocked(*j, "")
 	case j.State == Running:
 		q.cancels[id]()

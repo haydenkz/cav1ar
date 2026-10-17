@@ -86,7 +86,7 @@ func (s *stateDB) Close() error { return s.db.Close() }
 // savedState is what a Watcher reads back.
 type savedState struct {
 	settings string
-	scanned  time.Time // when the state was last saved, at the end of a scan
+	scanned  time.Time // when the state was last saved: during or after a scan, or as the Watcher stopped
 	folders  map[string]bool
 	files    map[string]fileState
 }
