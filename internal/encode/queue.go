@@ -229,8 +229,8 @@ func (q *Queue) Close() {
 	q.wg.Wait()
 }
 
-// dispatchLocked starts queued jobs in the order they run, each on the first
-// device with room for it, until none has. The caller must hold q.mu.
+// dispatchLocked starts queued jobs in the order they run, each on the least
+// busy device with room for it, until none has. The caller must hold q.mu.
 func (q *Queue) dispatchLocked() {
 	if q.paused || q.holding || q.closed || q.ctx.Err() != nil {
 		return
@@ -257,14 +257,20 @@ func (q *Queue) dispatchLocked() {
 	}
 }
 
-// freeDeviceLocked is the first device with room for another job.
+// freeDeviceLocked is the device with room for another job that is least
+// busy for its number at once, so jobs spread over the devices rather than
+// filling one first. Ties go to the device listed first.
 func (q *Queue) freeDeviceLocked() (Device, bool) {
+	var best Device
+	bestBusy, bestSlots := 0, 0
 	for _, d := range q.devices {
-		if q.busy[d.ID] < q.settings.Slots(d, q.devices) {
-			return d, true
+		busy, slots := q.busy[d.ID], q.settings.Slots(d, q.devices)
+		// busy/slots < bestBusy/bestSlots, without dividing.
+		if busy < slots && (bestSlots == 0 || busy*bestSlots < bestBusy*slots) {
+			best, bestBusy, bestSlots = d, busy, slots
 		}
 	}
-	return Device{}, false
+	return best, bestSlots > 0
 }
 
 // RunOrder compares two queued jobs by the order they run in: higher

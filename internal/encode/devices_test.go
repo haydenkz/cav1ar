@@ -97,12 +97,13 @@ func hasArgs(args []string, opt, val string) bool {
 	return false
 }
 
-// Each device runs as many jobs as it has room for, so two devices with
-// one each run two jobs at once, and the job says which it runs on.
+// Jobs spread over the devices, each going to the least busy for its number
+// at once, so two devices with two each take one job apiece before either
+// takes a second, and the job says which it runs on.
 func TestJobsSpreadAcrossDevices(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := DefaultSettings()
-	s.Encoders = map[string]int{"nvidia": 1, "vaapi": 1}
+	s.Encoders = map[string]int{"nvidia": 2, "vaapi": 2}
 	q := newQueue(ctx, s, []Device{testGPU, testArc})
 	defer func() { cancel(); q.Close() }()
 
