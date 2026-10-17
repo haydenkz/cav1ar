@@ -37,6 +37,13 @@ func runDaemon(ctx context.Context, q *encode.Queue, w *encode.Watcher, batch bo
 	} else {
 		defer srv.Close()
 	}
+	if s.WorkerListen != "" {
+		if ws, err := listenForWorkers(s, q); err != nil {
+			log.Printf("cav1ar: can't take workers: %v", err)
+		} else {
+			defer ws.Close()
+		}
+	}
 	go followSettings(ctx, q, srv)
 	time.AfterFunc(2*time.Second, func() {
 		if len(q.Settings().Watch) > 0 && !w.Active() {

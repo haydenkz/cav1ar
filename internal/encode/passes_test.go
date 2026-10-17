@@ -55,7 +55,7 @@ func testSettings(out string) Settings {
 
 func noUpdates() updates {
 	return updates{
-		planned: func(Action, string) {}, started: func(*os.Process) {}, progress: func(progress) {},
+		planned: func(Action, string) {}, started: func(Process) {}, progress: func(progress) {},
 		log: func(string) {}, note: func(string) {}, step: func(string) {},
 	}
 }

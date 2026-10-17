@@ -2,6 +2,9 @@ package encode
 
 import (
 	"context"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -117,5 +120,56 @@ func TestJobsSpreadAcrossDevices(t *testing.T) {
 	}
 	if started[0] != "Test GPU" || started[1] != "Test Arc" {
 		t.Errorf("jobs ran on %v; want the first on the GPU and the second on the Arc", started)
+	}
+}
+
+// goneRunner is a worker that leaves as its first pass starts, taking its
+// devices with it as the worker server does.
+type goneRunner struct{ q *Queue }
+
+func (g goneRunner) Run(context.Context, []string, Output) error {
+	g.q.SetWorkerDevices("w", nil)
+	return ErrWorkerGone
+}
+
+// A job whose worker goes away goes back in the queue, rather than failing.
+func TestJobsGoBackWhenTheirWorkerGoes(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "in.mkv")
+	if err := exec.Command(FFmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc=d=1:s=320x240",
+		"-c:v", "mpeg4", src).Run(); err != nil {
+		t.Skip("ffmpeg can't make a test clip:", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s := DefaultSettings()
+	s.WorkerDir = t.TempDir()
+	q := newQueue(ctx, s, []Device{{ID: "w/vaapi:x", Kind: EncoderVAAPI, Name: "GPU on w", Worker: "w"}})
+	defer func() { cancel(); q.Close() }()
+	AddWorker("w", goneRunner{q})
+	defer RemoveWorker("w")
+
+	q.Add(src)
+	deadline := time.After(30 * time.Second)
+	ran := false
+	for {
+		evs := make(chan []Event, 1)
+		go func() { evs <- q.Next() }()
+		select {
+		case batch := <-evs:
+			for _, ev := range batch {
+				switch {
+				case ev.Job.State == Running:
+					ran = true
+				case ev.Job.State == Queued && ran:
+					if !strings.Contains(ev.Line, "worker went away") {
+						t.Errorf("it went back without saying why: %q", ev.Line)
+					}
+					return
+				case ev.Job.State.Finished():
+					t.Fatalf("the job ended %s: %v", ev.Job.State, ev.Job.Err)
+				}
+			}
+		case <-deadline:
+			t.Fatal("the job never went back in the queue")
+		}
 	}
 }

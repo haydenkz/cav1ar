@@ -123,6 +123,13 @@ type Settings struct {
 	WatchExisting  bool          `json:"watch_existing,omitempty"`  // also queue videos already in a folder when it is first watched
 
 	Preroll string `json:"preroll,omitempty"` // a clip to put before every result; see preroll.go
+
+	// Workers lend a daemon their GPUs; see Runner. WorkerListen is the
+	// address the daemon takes them on, such as ":7310", or empty for none.
+	// WorkerDir is a folder the daemon and its workers all reach at that
+	// path, for the files workers write.
+	WorkerListen string `json:"worker_listen,omitempty"`
+	WorkerDir    string `json:"worker_dir,omitempty"`
 }
 
 // Special AudioKbps values.
@@ -190,6 +197,10 @@ func (s Settings) Validate() error {
 		return fmt.Errorf("language must be a 2 or 3 letter code like eng, not %q", s.Language)
 	case strings.TrimSpace(s.NameTemplate) == "":
 		return errors.New("the file name template can't be empty")
+	case s.WorkerDir != "" && !filepath.IsAbs(s.WorkerDir):
+		return fmt.Errorf("the workers' folder must be a full path, not %q", s.WorkerDir)
+	case s.WorkerListen != "" && s.WorkerDir == "":
+		return errors.New("taking workers needs a folder the daemon and its workers share (worker_dir)")
 	}
 	for _, f := range s.Watch {
 		if f.Kind != FolderAny && f.Kind != FolderMovies && f.Kind != FolderShows {

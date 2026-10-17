@@ -44,6 +44,9 @@ type Device struct {
 	Name  string  `json:"name"`            // for people, e.g. "GeForce RTX 4070"
 	Path  string  `json:"path,omitempty"`  // the device node VAAPI opens
 	Index int     `json:"index,omitempty"` // the NVIDIA GPU's number, in PCI bus order
+	// Worker is the name of the worker the device is on, or empty for one
+	// here; see Runner.
+	Worker string `json:"worker,omitempty"`
 }
 
 // GPU reports whether d is a GPU rather than the CPU.
@@ -239,7 +242,7 @@ func trial(opts ...string) error {
 	}
 	args = append(args, opts...)
 	args = append(args, "-frames:v", "1", "-f", "null", "-")
-	return exec.CommandContext(ctx, "ffmpeg", args...).Run()
+	return exec.CommandContext(ctx, FFmpeg, args...).Run()
 }
 
 // CheckEncoder says whether a device of kind e was found, and why not if

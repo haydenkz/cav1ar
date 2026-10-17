@@ -54,6 +54,12 @@ func main() {
 		return nil
 	})
 	listDevices := flag.Bool("devices", false, "list what can encode AV1 here, and exit")
+	workFor := flag.String("worker", "", "lend this machine's GPUs to the cav1ar daemon at this address, such as 192.168.1.10:7310, "+
+		"instead of encoding for itself; it connects with the daemon's worker token")
+	host, _ := os.Hostname()
+	workerName := flag.String("worker-name", host, "with -worker: the name the daemon knows this worker by")
+	allow := flag.String("allow", "", "with -worker: the folders the daemon's passes may use, comma-separated; empty allows any")
+	ffmpeg := flag.String("ffmpeg", encode.FFmpeg, "with -worker: the ffmpeg to encode with")
 	flag.IntVar(&settings.CRF, "crf", saved.CRF, "quality, 1–63; lower is better quality and bigger files, about the same on every encoder")
 	flag.IntVar(&settings.Preset, "preset", saved.Preset, "CPU speed, 0 (slowest, smallest files) to 13 (fastest)")
 	flag.IntVar(&settings.NVENCPreset, "nvenc-preset", saved.NVENCPreset, "NVIDIA speed, 1 (fastest) to 7 (slowest, smallest files)")
@@ -98,6 +104,13 @@ func main() {
 	flag.Parse()
 	if *showVersion {
 		fmt.Println("cav1ar", version)
+		return
+	}
+	if *workFor != "" {
+		encode.FFmpeg = *ffmpeg
+		if err := runWorker(*workFor, *workerName, *allow); err != nil {
+			fail(1, "%v", err)
+		}
 		return
 	}
 	if *listDevices {
