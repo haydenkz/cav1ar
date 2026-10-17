@@ -7,10 +7,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -95,11 +97,12 @@ func joinPoint(ctx context.Context, path string, length time.Duration) (time.Dur
 
 // prerollFor returns a copy of the preroll encoded to match main, which d
 // encoded, building it the first time each kind of main needs one, and how
-// long it runs. NVENC can match main's AV1 header more closely, so an NVIDIA
-// GPU here encodes the preroll for its own results; SVT-AV1 does for the
-// rest, including those from workers, since the preroll is built here.
+// long it runs. A GPU encodes the preroll for its own results, with the
+// encoder and settings it gave main, on a worker if that's where it is, so
+// the two share an AV1 header and players see one continuous video. SVT-AV1
+// encodes it for the CPU's, here.
 func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main mediaInfo, u updates) (string, time.Duration, error) {
-	nvenc := d.Kind == EncoderNVIDIA && d.Worker == ""
+	nvenc, vaapi := d.Kind == EncoderNVIDIA, d.Kind == EncoderVAAPI
 	id, err := prerollID(s.Preroll)
 	if err != nil {
 		return "", 0, err
@@ -130,7 +133,11 @@ func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main
 	if err != nil {
 		return "", 0, err
 	}
-	args := []string{"-hide_banner", "-nostdin", "-nostats", "-v", "error", "-y", "-i", s.Preroll}
+	args := []string{"-hide_banner", "-nostdin", "-nostats", "-v", "error", "-y"}
+	if vaapi {
+		args = append(args, "-vaapi_device", d.Path)
+	}
+	args = append(args, "-i", s.Preroll)
 	if !hasAudio(src) {
 		args = append(args, "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo")
 	}
@@ -144,14 +151,42 @@ func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main
 	switch {
 	case nvenc && tenBit:
 		vf = append(vf, "format=p010le")
+	case vaapi && tenBit:
+		vf = append(vf, "format=p010")
+	case vaapi:
+		vf = append(vf, "format=nv12")
 	case tenBit:
 		vf = append(vf, "format=yuv420p10le")
 	default:
 		vf = append(vf, "format=yuv420p")
 	}
-	vf = append(vf, "setparams="+colorParams(v))
+	params := colorParams(v)
+	// Where the chroma is sited is in the AV1 header too, and encoders take
+	// it from the frames, so give the preroll's main's.
+	if len(config) > 2 {
+		switch config[2] & 3 {
+		case 1:
+			params += ":chroma_location=left"
+		case 2:
+			params += ":chroma_location=topleft"
+		}
+	}
+	vf = append(vf, "setparams="+params)
+	if vaapi {
+		vf = append(vf, "hwupload")
+	}
 	args = append(args, "-vf", strings.Join(vf, ","), "-frames:v", strconv.Itoa(frames))
-	if nvenc {
+	// Matching the level and tier keeps the sequence header the same as
+	// main's.
+	var levelTier []string
+	if v.Level >= 0 && v.Level < 24 {
+		levelTier = append(levelTier, "-level", fmt.Sprintf("%d.%d", 2+v.Level/4, v.Level%4))
+	}
+	if len(config) > 2 {
+		levelTier = append(levelTier, "-tier", strconv.Itoa(int(config[2]>>7)))
+	}
+	switch {
+	case nvenc:
 		maxRate := nvencMaxRate(resolution(v.Width, v.Height))
 		args = append(args, "-c:v", "av1_nvenc")
 		if d.Index > 0 { // left out for the first GPU, which keeps prerolls built before there could be more
@@ -161,15 +196,14 @@ func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main
 			"-rc", "vbr", "-cq", strconv.Itoa(s.CRF), "-b:v", "0",
 			"-maxrate", strconv.Itoa(maxRate)+"M", "-bufsize", strconv.Itoa(2*maxRate)+"M",
 			"-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1", "-g", "240")
-		// Matching the level and tier keeps the sequence header the same as
-		// main's, so players see one continuous video.
-		if v.Level >= 0 && v.Level < 24 {
-			args = append(args, "-level", fmt.Sprintf("%d.%d", 2+v.Level/4, v.Level%4))
+		args = append(args, levelTier...)
+	case vaapi:
+		args = append(args, "-c:v", "av1_vaapi", "-rc_mode", "CQP", "-global_quality:v", strconv.Itoa(vaapiQP(s.CRF)), "-g", "240")
+		if s.VAAPIPreset > 0 {
+			args = append(args, "-compression_level:v", strconv.Itoa(s.VAAPIPreset))
 		}
-		if len(config) > 2 {
-			args = append(args, "-tier", strconv.Itoa(int(config[2]>>7)))
-		}
-	} else {
+		args = append(args, levelTier...)
+	default:
 		args = append(args, "-c:v", "libsvtav1", "-preset", strconv.Itoa(s.Preset), "-crf", strconv.Itoa(svtCRF(s.CRF)))
 	}
 
@@ -219,9 +253,13 @@ func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main
 	f.Close()
 	tmp := f.Name()
 	defer os.Remove(tmp)
-	u.log(fmt.Sprintf("cav1ar: encoding the preroll to match %dx%d %s %s", v.Width, v.Height, v.FrameRate, v.PixFmt))
-	if b, err := exec.CommandContext(ctx, "ffmpeg", append(args, "-f", "matroska", tmp)...).CombinedOutput(); err != nil {
-		return "", 0, fmt.Errorf("encoding the preroll: %s", lastLine(string(b), err))
+	where := "the CPU"
+	if nvenc || vaapi {
+		where = d.label()
+	}
+	u.log(fmt.Sprintf("cav1ar: encoding the preroll to match %dx%d %s %s, on %s", v.Width, v.Height, v.FrameRate, v.PixFmt, where))
+	if err := encodePreroll(ctx, s, d, args, tmp, length, u); err != nil {
+		return "", 0, err
 	}
 	if got, err := av1Config(ctx, tmp); err == nil && !bytes.Equal(got, config) {
 		u.log("cav1ar: the preroll's AV1 header differs from the video's, so some players may stutter where they meet")
@@ -230,6 +268,78 @@ func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main
 		return "", 0, err
 	}
 	return out, length, nil
+}
+
+// encodePreroll runs ffmpeg with args, which read the preroll clip, to write
+// out. On a worker's device, it runs there: the clip is copied to the folder
+// the worker shares with this cav1ar, and the worker writes the preroll there
+// too, for it to be copied here.
+func encodePreroll(ctx context.Context, s Settings, d Device, args []string, out string, length time.Duration, u updates) error {
+	runner, err := runnerFor(d)
+	if err != nil {
+		return err
+	}
+	if runner == nil || d.Kind == EncoderCPU { // the CPU's are built here
+		if b, err := exec.CommandContext(ctx, FFmpeg, append(args, "-f", "matroska", out)...).CombinedOutput(); err != nil {
+			return fmt.Errorf("encoding the preroll: %s", lastLine(string(b), err))
+		}
+		return nil
+	}
+	if s.WorkerDir == "" {
+		return errors.New("encoding the preroll on a worker needs a folder it shares with this cav1ar; set worker_dir")
+	}
+	shared := func() (string, func(), error) {
+		path := tempPath(filepath.Join(s.WorkerDir, "preroll"))
+		release, err := holdTemp(path)
+		if err != nil {
+			return "", nil, err
+		}
+		return path, func() { release(); os.Remove(path) }, nil
+	}
+	clip, done, err := shared()
+	if err != nil {
+		return err
+	}
+	defer done()
+	if err := copyFile(s.Preroll, clip); err != nil {
+		return err
+	}
+	result, done, err := shared()
+	if err != nil {
+		return err
+	}
+	defer done()
+	args = slices.Clone(args)
+	if i := slices.Index(args, s.Preroll); i > 0 && args[i-1] == "-i" {
+		args[i] = clip
+	}
+	quiet := u
+	quiet.progress = func(progress) {} // it's the job's main pass that shows progress
+	if err := runRemote(ctx, runner, append(args, "-f", "matroska", result), length, 0, quiet); err != nil {
+		if errors.Is(err, ErrWorkerGone) || ctx.Err() != nil {
+			return err
+		}
+		return fmt.Errorf("encoding the preroll: %w", err)
+	}
+	return copyFile(result, out)
+}
+
+// copyFile copies from to to, which it creates or empties.
+func copyFile(from, to string) error {
+	in, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	w, err := os.Create(to)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(w, in); err != nil {
+		w.Close()
+		return err
+	}
+	return w.Close()
 }
 
 // audioEncoders are the encoders that can match each audio codec.

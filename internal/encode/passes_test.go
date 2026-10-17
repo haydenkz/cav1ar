@@ -290,3 +290,63 @@ func testPrerollJoin(t *testing.T, strip bool) {
 		t.Errorf("the passes left files behind: %v", left)
 	}
 }
+
+// fakeWorker stands in for a worker, running the passes it's given here and
+// noting each one.
+type fakeWorker struct{ ran [][]string }
+
+func (w *fakeWorker) Run(ctx context.Context, args []string, o Output) error {
+	w.ran = append(w.ran, args)
+	var stderr strings.Builder
+	cmd := exec.CommandContext(ctx, FFmpeg, args...)
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	for line := range strings.Lines(stderr.String()) {
+		o.Stderr(strings.TrimSpace(line))
+	}
+	return err
+}
+
+// A GPU on a worker encodes the preroll for its own results, there, reading
+// the clip from the folder it shares with the daemon.
+func TestAWorkersGPUEncodesItsPreroll(t *testing.T) {
+	if err := CheckEncoder(EncoderNVIDIA); err != nil {
+		t.Skip(err)
+	}
+	dir, outDir, shared := t.TempDir(), t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	src := makeSource(t, dir)
+	intro := filepath.Join(dir, "intro.mkv")
+	ffmpeg(t, "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=2",
+		"-f", "lavfi", "-i", "sine=frequency=880:duration=2:sample_rate=48000", "-c:v", "mpeg4", "-c:a", "aac", intro)
+	s := testSettings(outDir)
+	s.Preroll, s.WorkerDir = intro, shared
+	w := &fakeWorker{}
+	AddWorker("w", w)
+	defer RemoveWorker("w")
+	gpu := Device{ID: "w/nvidia:x", Kind: EncoderNVIDIA, Name: "Test GPU (w)", Worker: "w"}
+	var logged []string
+	u := noUpdates()
+	u.log = func(line string) { logged = append(logged, line) }
+	if err := encodeFile(context.Background(), src, s, gpu, u); err != nil {
+		t.Fatalf("%v\n%s", err, strings.Join(logged, "\n"))
+	}
+	var built []string
+	for _, args := range w.ran {
+		if slices.Contains(args, "-frames:v") { // the preroll's pass, which stops at its length
+			built = args
+		}
+	}
+	if built == nil {
+		t.Fatalf("the worker never encoded the preroll; it ran %q", w.ran)
+	}
+	if slices.Contains(built, intro) {
+		t.Error("the worker was given the clip's own path, not the shared folder's copy")
+	}
+	if !slices.ContainsFunc(logged, func(l string) bool { return strings.Contains(l, "encoding the preroll to match") && strings.HasSuffix(l, "on Test GPU (w)") }) {
+		t.Errorf("the log doesn't say the worker's GPU encoded the preroll:\n%s", strings.Join(logged, "\n"))
+	}
+	if left, _ := os.ReadDir(shared); len(left) > 0 {
+		t.Errorf("files were left in the shared folder: %v", left)
+	}
+}
