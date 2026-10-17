@@ -184,7 +184,7 @@ func TestEncodeFileLogsItsStages(t *testing.T) {
 	}
 	want := []string{
 		"checking the file",
-		"encoding the video and audio",
+		"encoding the video and audio on the CPU",
 		"putting the video, audio and subtitles together",
 		"checking the result",
 		"moving the result into place",
