@@ -10,10 +10,12 @@ fi
 
 mkdir -p /config/cav1ar /config/cache
 config=/config/cav1ar/config.json
+# json escapes backslashes and double quotes, to put $1 in a JSON string.
+json() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 if [ ! -e "$config" ] && [ -n "$CAV1AR_MOVIES$CAV1AR_SHOWS" ]; then
 	watch=""
-	[ -n "$CAV1AR_MOVIES" ] && watch="{\"path\": \"$CAV1AR_MOVIES\", \"kind\": \"movies\", \"priority\": 1}"
-	[ -n "$CAV1AR_SHOWS" ] && watch="${watch:+$watch, }{\"path\": \"$CAV1AR_SHOWS\", \"kind\": \"shows\"}"
+	[ -n "$CAV1AR_MOVIES" ] && watch="{\"path\": \"$(json "$CAV1AR_MOVIES")\", \"kind\": \"movies\", \"priority\": 1}"
+	[ -n "$CAV1AR_SHOWS" ] && watch="${watch:+$watch, }{\"path\": \"$(json "$CAV1AR_SHOWS")\", \"kind\": \"shows\"}"
 	# Results replace their originals under the same name, so the *arr apps
 	# keep track of them.
 	printf '{"watch": [%s], "name_template": "{name}", "delete_original": true}\n' "$watch" > "$config"

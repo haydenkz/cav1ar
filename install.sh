@@ -21,6 +21,10 @@ while [ $# -gt 0 ]; do
 	--service) SERVICE=1 ;;
 	--uninstall) UNINSTALL=1 ;;
 	--bin-dir)
+		if [ $# -lt 2 ] || [ -z "$2" ]; then
+			echo "--bin-dir needs a folder, as in: --bin-dir ~/bin" >&2
+			exit 2
+		fi
 		BIN_DIR="$2"
 		shift
 		;;
@@ -59,18 +63,20 @@ fi
 
 [ "$(uname -s)" = Linux ] || die "cav1ar only supports Linux"
 
+# cav1ar is built from the clone this script is in.
+script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
+if [ ! -f "$script_dir/go.mod" ] || ! grep -q "module github.com/$REPO" "$script_dir/go.mod"; then
+	die "run install.sh from a clone of the repository: git clone https://github.com/$REPO"
+fi
+
 # Find a Go new enough to build cav1ar. With mise, `go` may be a shim that
 # fails until a version is set globally, so ask mise for one instead.
-script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)
-GO_NEED=1.27
-if [ -f "$script_dir/go.mod" ]; then
-	GO_NEED=$(sed -n 's/^go \([0-9.]*\).*/\1/p' "$script_dir/go.mod")
-fi
+GO_NEED=$(sed -n 's/^go \([0-9.]*\).*/\1/p' "$script_dir/go.mod")
 GO_MINOR=$(echo "$GO_NEED" | cut -d. -f1,2)
 # go_ok reports whether the go command given is new enough. Run from the
 # clone, go switches to the toolchain go.mod asks for where it is allowed to.
 go_ok() {
-	have=$(cd "${script_dir:-.}" && "$@" env GOVERSION 2>/dev/null) || return 1
+	have=$(cd "$script_dir" && "$@" env GOVERSION 2>/dev/null) || return 1
 	awk -v have="${have#go}" -v need="$GO_NEED" 'BEGIN {
 		split(have, h, "."); split(need, n, ".")
 		for (i = 1; i <= 3; i++) { if (h[i] + 0 != n[i] + 0) exit !(h[i] + 0 > n[i] + 0) }
@@ -109,14 +115,9 @@ if ! has mkvpropedit || ! has mkvextract; then
 fi
 
 mkdir -p "$BIN_DIR"
-if [ -f "$script_dir/go.mod" ] && grep -q "module github.com/$REPO" "$script_dir/go.mod"; then
-	say "building from $script_dir"
-	version=$(git -C "$script_dir" describe --tags --always --dirty 2>/dev/null || echo dev)
-	(cd "$script_dir" && $GO build -trimpath -ldflags "-s -w -X main.version=$version" -o "$BIN_DIR/cav1ar" ./cmd/cav1ar)
-else
-	say "building with go install"
-	GOBIN="$BIN_DIR" $GO install "github.com/$REPO/cmd/cav1ar@latest"
-fi
+say "building from $script_dir"
+version=$(git -C "$script_dir" describe --tags --always --dirty 2>/dev/null || echo dev)
+(cd "$script_dir" && $GO build -trimpath -ldflags "-s -w -X main.version=$version" -o "$BIN_DIR/cav1ar" ./cmd/cav1ar)
 say "installed $BIN_DIR/cav1ar"
 
 case ":$PATH:" in

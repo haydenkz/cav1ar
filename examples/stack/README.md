@@ -26,7 +26,7 @@ once it checks out.
 
    | App | Address | Set up |
    |---|---|---|
-   | SABnzbd | `:8080` | Run the wizard. Under Config → Folders, set the temporary folder to `/data/usenet/incomplete` and the completed one to `/data/usenet/complete`, and add the categories `movies` and `tv`. |
+   | SABnzbd | `:8080` | Run the wizard. Under Config → Folders, set the temporary folder to `/data/usenet/incomplete` and the completed one to `/data/usenet/complete`. Under Config → Categories, add the categories `movies` and `tv`. |
    | qBittorrent | `:8090` | Log in as `admin` with the password from `docker logs qbittorrent`, then change it. Under Options → Downloads, set the save path to `/data/torrents`. |
    | Radarr | `:7878` | Add the root folder `/data/media/movies`. Under Download Clients, add SABnzbd (host `sabnzbd`, port 8080, its API key, category `movies`) and qBittorrent (host `qbittorrent`, port 8090). |
    | Sonarr | `:8989` | The same, with `/data/media/tv` and the category `tv`. |
