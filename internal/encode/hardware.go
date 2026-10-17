@@ -330,6 +330,12 @@ func videoArgs(s Settings, d Device, v streamInfo, width, height int, hwDecode b
 		// global_quality is an option every encoder has, so it must name the
 		// video's, or the audio encoder takes it too and Opus refuses it.
 		afterInput = []string{"-c:v", "av1_vaapi", "-rc_mode", "CQP", "-global_quality:v", strconv.Itoa(vaapiQP(s.CRF)), "-g", "240"}
+		// The driver's speed level, which, like global_quality, the audio
+		// encoder would take too if it didn't name the video's. On an Intel
+		// Arc it hardly changes the size or quality, only the speed.
+		if s.VAAPIPreset > 0 {
+			afterInput = append(afterInput, "-compression_level:v", strconv.Itoa(s.VAAPIPreset))
+		}
 	default:
 		filters = cpuFilters(v, width, height, scale)
 		afterInput = []string{"-c:v", "libsvtav1", "-preset", strconv.Itoa(s.Preset), "-crf", strconv.Itoa(svtCRF(s.CRF))}

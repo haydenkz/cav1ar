@@ -99,10 +99,11 @@ type Settings struct {
 	// by its kind (cpu, nvidia or vaapi); 0 turns it off. Devices it doesn't
 	// mention get the default; see Slots.
 	Encoders    map[string]int `json:"encoders,omitempty"`
-	CRF         int            `json:"crf"`                  // quality, 1–63 on NVENC's scale, which the other encoders are set to match; lower is better
-	Preset      int            `json:"preset"`               // CPU speed, 0 (slowest, best) to 13 (fastest) like SVT-AV1's
-	NVENCPreset int            `json:"nvenc_preset"`         // NVIDIA speed, 1 (fastest) to 7 (slowest, best) like NVENC's p1–p7
-	MaxHeight   int            `json:"max_height,omitempty"` // scale bigger video down to fit this height and its 16:9 width; 0 keeps the size
+	CRF         int            `json:"crf"`                    // quality, 1–63 on NVENC's scale, which the other encoders are set to match; lower is better
+	Preset      int            `json:"preset"`                 // CPU speed, 0 (slowest, best) to 13 (fastest) like SVT-AV1's
+	NVENCPreset int            `json:"nvenc_preset"`           // NVIDIA speed, 1 (fastest) to 7 (slowest, best) like NVENC's p1–p7
+	VAAPIPreset int            `json:"vaapi_preset,omitempty"` // AMD/Intel speed, 1 (slowest, best) to 7 (fastest) as Intel's driver counts it; 0 leaves it to the driver
+	MaxHeight   int            `json:"max_height,omitempty"`   // scale bigger video down to fit this height and its 16:9 width; 0 keeps the size
 
 	AudioCodec  AudioCodec  `json:"audio_codec"`       // what audio is encoded to, unless AudioKbps is AudioCopy
 	AudioKbps   int         `json:"audio_kbps"`        // bitrate, or AudioCopy or AudioAuto
@@ -158,7 +159,7 @@ func DefaultSettings() Settings {
 // has one, including keeping originals. Personal settings are kept: language,
 // release group, video size, and where files go.
 func (s Settings) Recommended() Settings {
-	s.Encoders, s.CRF, s.Preset, s.NVENCPreset = nil, 30, 6, 6
+	s.Encoders, s.CRF, s.Preset, s.NVENCPreset, s.VAAPIPreset = nil, 30, 6, 6, 0
 	s.AudioCodec, s.AudioKbps, s.Downmix = Opus, AudioAuto, false
 	s.AudioTracks, s.Subtitles, s.TidySubs = KeepAll, KeepAll, true
 	s.StripMetadata, s.Title = true, "{title} ({year}) {episode}"
@@ -181,6 +182,8 @@ func (s Settings) Validate() error {
 		return fmt.Errorf("preset must be between 0 and 13, not %d", s.Preset)
 	case s.NVENCPreset < 1 || s.NVENCPreset > 7:
 		return fmt.Errorf("NVIDIA preset must be between 1 and 7, not %d", s.NVENCPreset)
+	case s.VAAPIPreset < 0 || s.VAAPIPreset > 7:
+		return fmt.Errorf("AMD/Intel speed must be between 1 and 7, or 0 for the driver's own, not %d", s.VAAPIPreset)
 	case s.MaxHeight != 0 && s.MaxHeight < 144:
 		return fmt.Errorf("maximum height must be at least 144, or 0 to keep the size, not %d", s.MaxHeight)
 	case s.AudioCodec != Opus && s.AudioCodec != AAC:
@@ -295,6 +298,8 @@ func (s Settings) DeviceSummary(devices []Device) string {
 			parts = append(parts, fmt.Sprintf("%s %d at once p%d", d.Name, n, s.NVENCPreset))
 		case d.Kind == EncoderCPU:
 			parts = append(parts, fmt.Sprintf("%s %d at once preset %d", d.Name, n, s.Preset))
+		case d.Kind == EncoderVAAPI && s.VAAPIPreset > 0:
+			parts = append(parts, fmt.Sprintf("%s %d at once speed %d", d.Name, n, s.VAAPIPreset))
 		default:
 			parts = append(parts, fmt.Sprintf("%s %d at once", d.Name, n))
 		}

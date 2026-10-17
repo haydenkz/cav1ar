@@ -71,6 +71,7 @@ func main() {
 	flag.IntVar(&settings.CRF, "crf", saved.CRF, "quality, 1–63; lower is better quality and bigger files, about the same on every encoder")
 	flag.IntVar(&settings.Preset, "preset", saved.Preset, "CPU speed, 0 (slowest, smallest files) to 13 (fastest)")
 	flag.IntVar(&settings.NVENCPreset, "nvenc-preset", saved.NVENCPreset, "NVIDIA speed, 1 (fastest) to 7 (slowest, smallest files)")
+	flag.IntVar(&settings.VAAPIPreset, "vaapi-speed", saved.VAAPIPreset, "AMD/Intel speed, 1 (slowest) to 7 (fastest) as Intel's driver counts it; 0 leaves it to the driver")
 	flag.IntVar(&settings.MaxHeight, "max-height", saved.MaxHeight, "scale bigger video down to this height, e.g. 1080; 0 keeps the size")
 	flag.Func("audio-codec", "audio codec: opus or aac (default \""+string(saved.AudioCodec)+"\")",
 		func(v string) error { settings.AudioCodec = encode.AudioCodec(v); return nil })

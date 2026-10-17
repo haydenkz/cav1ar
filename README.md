@@ -78,7 +78,10 @@ does the same from the command line, by kind or by the IDs `-devices` shows.
 
 Quality is one number, 1–63 on NVENC's scale, where lower is better. The
 other encoders are set to match it, so a file looks about the same whichever
-device encoded it.
+device encoded it. Each kind of encoder has a speed, shown under its first
+device: NVENC's p1–p7, SVT-AV1's preset, and the AMD/Intel driver's level.
+On an Intel Arc the level changes only the speed, hardly the size or
+quality, so the driver's own default is best.
 
 ### Workers
 
