@@ -80,6 +80,34 @@ Quality is one number, 1–63 on NVENC's scale, where lower is better. The
 other encoders are set to match it, so a file looks about the same whichever
 device encoded it.
 
+### Workers
+
+A daemon can also encode on other machines' GPUs, or a container's: workers.
+The daemon keeps the queue and does everything but the encode itself, which
+runs on the worker. Both must see the media at the same paths, and share a
+folder for the files the worker writes. In the daemon's
+`~/.config/cav1ar/config.json`:
+
+```json
+"worker_listen": ":7310",
+"worker_dir": "/media/scratch/.cav1ar-work"
+```
+
+Restart the daemon, and it makes a token in `~/.config/cav1ar/worker-token`.
+Copy that to the same place on the worker, which needs cav1ar, ffmpeg and
+its GPU's driver, then run:
+
+```sh
+cav1ar -worker daemon-host:7310 -allow /media
+```
+
+The worker's GPUs then show up alongside the daemon's, named after the
+worker, and take jobs the same way. `-allow` keeps the daemon's passes to the
+folders given, `-worker-name` names the worker, and `-ffmpeg` picks the
+ffmpeg it runs. Each time a worker connects, the daemon checks it sees the
+shared folder; a job whose worker goes away goes back in the queue. The token
+is all that keeps others out, so only open the port to a network you trust.
+
 ## File names
 
 Encodes are named from a template, set in Settings → Output:

@@ -96,9 +96,10 @@ func joinPoint(ctx context.Context, path string, length time.Duration) (time.Dur
 // prerollFor returns a copy of the preroll encoded to match main, which d
 // encoded, building it the first time each kind of main needs one, and how
 // long it runs. NVENC can match main's AV1 header more closely, so an NVIDIA
-// GPU encodes the preroll for its own results; SVT-AV1 does for the rest.
+// GPU here encodes the preroll for its own results; SVT-AV1 does for the
+// rest, including those from workers, since the preroll is built here.
 func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main mediaInfo, u updates) (string, time.Duration, error) {
-	nvenc := d.Kind == EncoderNVIDIA
+	nvenc := d.Kind == EncoderNVIDIA && d.Worker == ""
 	id, err := prerollID(s.Preroll)
 	if err != nil {
 		return "", 0, err

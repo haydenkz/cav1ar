@@ -3,7 +3,6 @@
 package encode
 
 import (
-	"os"
 	"strings"
 	"time"
 )
@@ -143,7 +142,7 @@ func Stage(line string) (name string, ok bool) { return strings.CutPrefix(line, 
 // updates is how a running encode reports back to the queue.
 type updates struct {
 	planned  func(Action, string) // what the job will do, and where the result will go
-	started  func(*os.Process)    // the encoder process, so pausing can suspend it
+	started  func(Process)        // the encoder process, so pausing can suspend it
 	progress func(progress)
 	log      func(line string)
 	note     func(note string) // sets Job.Note

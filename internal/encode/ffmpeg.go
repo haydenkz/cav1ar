@@ -148,10 +148,21 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 	}
 	// The passes' files are only intermediates, so keep them off the
 	// library's storage, which then only reads the source and writes the
-	// result.
+	// result. A worker writes the encoding pass's, so they go where it can
+	// reach them too.
 	work, err := workDir()
 	if err != nil {
 		return err
+	}
+	passWork := work
+	if d.Worker != "" {
+		if s.WorkerDir == "" {
+			return errors.New("encoding on a worker needs a folder it shares with this cav1ar; set worker_dir")
+		}
+		if err := os.MkdirAll(s.WorkerDir, 0o755); err != nil {
+			return err
+		}
+		passWork = s.WorkerDir
 	}
 	tmp := tempPath(out)
 	if s.Preroll != "" { // the result is an intermediate too, which the preroll is joined onto
@@ -163,7 +174,7 @@ func encodeFile(ctx context.Context, in string, s Settings, d Device, u updates)
 	}
 	defer release()
 	defer os.Remove(tmp) // gone already, once the result is in place
-	mainInfo, err := encodeAndRemux(ctx, p, action, tmp, work, u)
+	mainInfo, err := encodeAndRemux(ctx, p, action, tmp, passWork, u)
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -268,13 +279,30 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 	if action == ActionEncode && p.device.GPU() {
 		hwDecode = []bool{true, false}
 	}
+	// The encoding pass runs where the device is.
+	runner, err := runnerFor(p.device)
+	if err != nil {
+		return mediaInfo{}, err
+	}
 	for i, hw := range hwDecode {
 		stage := p.encodingPass()
 		if i > 0 {
 			stage += " again, decoding on the CPU"
 		}
+		if runner != nil {
+			stage += " on " + p.device.Worker
+		}
 		u.stage(stage)
-		err = run(p.encodeArgs(av, side, hw), frameRate(p.video))
+		args := p.encodeArgs(av, side, hw)
+		if runner == nil {
+			err = run(args, frameRate(p.video))
+		} else {
+			u.log("cav1ar: ffmpeg " + strings.Join(args, " "))
+			err = runRemote(ctx, runner, args, p.info.Duration, frameRate(p.video), u)
+		}
+		if errors.Is(err, ErrWorkerGone) {
+			return mediaInfo{}, err
+		}
 		if err == nil || ctx.Err() != nil || i == len(hwDecode)-1 {
 			break
 		}
@@ -326,7 +354,7 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 // runFFmpeg runs ffmpeg, reporting its progress and output as it goes. rate
 // is the frame rate of the video it writes, or 0 if it writes none.
 func runFFmpeg(ctx context.Context, args []string, duration time.Duration, rate float64, u updates) error {
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd := exec.CommandContext(ctx, FFmpeg, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

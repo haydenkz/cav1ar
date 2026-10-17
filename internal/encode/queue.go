@@ -28,7 +28,7 @@ type Queue struct {
 	busy     map[string]int // running jobs, by the ID of their device
 	jobs     []*Job
 	cancels  map[int]context.CancelFunc
-	procs    map[int]*os.Process // running encoder processes, by job ID
+	procs    map[int]Process // running encoder processes, by job ID
 	pending  []Event
 }
 
@@ -45,8 +45,19 @@ func newQueue(ctx context.Context, s Settings, devices []Device) *Queue {
 		devices:  devices,
 		busy:     make(map[string]int),
 		cancels:  make(map[int]context.CancelFunc),
-		procs:    make(map[int]*os.Process),
+		procs:    make(map[int]Process),
 	}
+}
+
+// SetWorkerDevices replaces the devices on the worker called name, which
+// joins with them, or leaves with none. GPUs are filled before the CPUs.
+func (q *Queue) SetWorkerDevices(name string, devices []Device) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.devices = slices.DeleteFunc(q.devices, func(d Device) bool { return d.Worker == name })
+	q.devices = append(q.devices, devices...)
+	slices.SortStableFunc(q.devices, func(a, b Device) int { return cmp.Compare(b2i(!a.GPU()), b2i(!b.GPU())) })
+	q.dispatchLocked()
 }
 
 // Devices lists what the queue encodes on, whether or not the settings
@@ -273,7 +284,7 @@ func (q *Queue) run(ctx context.Context, j *Job, s Settings, d Device) {
 	}
 	err := encodeFile(ctx, j.Input, s, d, updates{
 		planned: func(a Action, out string) { update("", func() { j.Action, j.Output = a, out }) },
-		started: func(p *os.Process) {
+		started: func(p Process) {
 			q.mu.Lock()
 			defer q.mu.Unlock()
 			q.procs[j.ID] = p
@@ -296,6 +307,10 @@ func (q *Queue) run(ctx context.Context, j *Job, s Settings, d Device) {
 	defer q.mu.Unlock()
 	j.Finished = time.Now()
 	switch {
+	case errors.Is(err, ErrWorkerGone) && ctx.Err() == nil:
+		// It starts over on whichever device has room next.
+		*j = Job{ID: j.ID, Input: j.Input, InSize: j.InSize, State: Queued, Next: j.Next, Priority: j.Priority}
+		q.emitLocked(*j, "cav1ar: "+err.Error()+" partway through, so it waits for another device")
 	case ctx.Err() != nil || errors.Is(err, context.Canceled):
 		j.State = Canceled
 	case err != nil:

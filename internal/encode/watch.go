@@ -189,6 +189,9 @@ func (w *Watcher) acquire() bool {
 	if dir, err := workDir(); err == nil {
 		removeStaleTemps(dir)
 	}
+	if dir := w.q.Settings().WorkerDir; dir != "" {
+		removeStaleTemps(dir)
+	}
 	return true
 }
 

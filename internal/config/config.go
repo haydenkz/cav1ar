@@ -2,12 +2,14 @@
 package config
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/haydenkz/cav1ar/internal/encode"
 )
@@ -18,6 +20,26 @@ func Path() (string, error) { return file("config.json") }
 // StatePath is where the folder watcher keeps what it knows between runs:
 // the videos it has seen, and the jobs that have finished.
 func StatePath() (string, error) { return file("cav1ar.db") }
+
+// WorkerToken is the token workers connect to a daemon with, which the
+// daemon keeps in its settings folder and a worker in its own, along with
+// where it is. With create, a daemon makes one there if there is none.
+func WorkerToken(create bool) (token, path string, err error) {
+	if path, err = file("worker-token"); err != nil {
+		return "", "", err
+	}
+	if data, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(data)) != "" {
+		return strings.TrimSpace(string(data)), path, nil
+	}
+	if !create {
+		return "", path, fmt.Errorf("no worker token at %s; copy the daemon's there, or set CAV1AR_WORKER_TOKEN", path)
+	}
+	token = rand.Text()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", path, err
+	}
+	return token, path, os.WriteFile(path, []byte(token+"\n"), 0o600)
+}
 
 func file(name string) (string, error) {
 	dir, err := os.UserConfigDir()
