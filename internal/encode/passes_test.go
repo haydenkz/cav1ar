@@ -343,7 +343,9 @@ func TestAWorkersGPUEncodesItsPreroll(t *testing.T) {
 	if slices.Contains(built, intro) {
 		t.Error("the worker was given the clip's own path, not the shared folder's copy")
 	}
-	if !slices.ContainsFunc(logged, func(l string) bool { return strings.Contains(l, "encoding the preroll to match") && strings.HasSuffix(l, "on Test GPU (w)") }) {
+	if !slices.ContainsFunc(logged, func(l string) bool {
+		return strings.Contains(l, "encoding the preroll to match") && strings.HasSuffix(l, "on Test GPU (w)")
+	}) {
 		t.Errorf("the log doesn't say the worker's GPU encoded the preroll:\n%s", strings.Join(logged, "\n"))
 	}
 	if left, _ := os.ReadDir(shared); len(left) > 0 {
