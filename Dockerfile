@@ -10,9 +10,11 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /cav1ar ./cmd/cav1ar
 
 FROM debian:bookworm-slim
-# Jellyfin's ffmpeg has NVENC, VAAPI with the Intel and AMD drivers, SVT-AV1
-# and Opus in one package. MKVToolNix fixes tags without rewriting files, and
-# pci.ids names GPUs.
+# Jellyfin's ffmpeg has NVENC, VAAPI, SVT-AV1 and Opus in one package. For
+# VAAPI it brings its own libva and drivers, Intel's (iHD, i965) and AMD's
+# (radeonsi), in /usr/lib/jellyfin-ffmpeg, so no other driver packages are
+# needed. NVIDIA's driver comes from the host. MKVToolNix fixes tags without
+# rewriting files, and pci.ids names GPUs.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl gnupg mkvtoolnix pci.ids \
  && install -d /etc/apt/keyrings \

@@ -60,7 +60,7 @@ func readSubs(ctx context.Context, in string, subs []subOut) (map[int]*subStats,
 	// Text tracks are counted as they are read below, so with no image
 	// tracks there's nothing to count.
 	if slices.ContainsFunc(subs, func(s subOut) bool { return !textSubs[s.Codec] }) {
-		out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-read_intervals", "%+"+window,
+		out, err := exec.CommandContext(ctx, FFprobe(), "-v", "error", "-read_intervals", "%+"+window,
 			"-count_packets", "-select_streams", "s", "-show_entries", "stream=index,codec_name,nb_read_packets",
 			"-of", "json", in).Output()
 		if err != nil {
@@ -103,7 +103,7 @@ func readSubs(ctx context.Context, in string, subs []subOut) (map[int]*subStats,
 	if len(text) == 0 {
 		return stats, nil
 	}
-	if out, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, FFmpeg, args...).CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("reading subtitles: %s", lastLine(string(out), err))
 	}
 	for _, sub := range text {
