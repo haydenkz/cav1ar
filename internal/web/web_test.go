@@ -217,3 +217,113 @@ func TestBrowseListsFoldersAndVideos(t *testing.T) {
 		t.Errorf("listed %v", names)
 	}
 }
+
+// With no password, the API answers only to names no other site can point
+// at this machine, so a page elsewhere can't use DNS rebinding to drive it.
+func TestNoPasswordAnswersOnlyToPrivateNames(t *testing.T) {
+	_, _, base := setup(t)
+	c := client(t)
+	for host, want := range map[string]int{"evil.example.com": 403, "nas.local:6767": 200, "192.168.1.10:6767": 200,
+		"[::1]:6767": 200, "media-box": 200, "box.tail1234.ts.net": 200} {
+		req, _ := http.NewRequest("GET", base+"/api/state", nil)
+		req.Host = host
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Errorf("as %s got %d, want %d", host, resp.StatusCode, want)
+		}
+	}
+}
+
+func TestAddTakesFullPathsOfVideos(t *testing.T) {
+	_, q, base := setup(t)
+	c := client(t)
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "film.mkv"), []byte("x"), 0o644)
+	os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("x"), 0o644)
+	for _, path := range []string{"", "film.mkv", filepath.Join(dir, "notes.txt")} {
+		b, _ := json.Marshal(map[string]string{"path": path})
+		if code, _ := do(t, c, "POST", base+"/api/add", string(b)); code != 400 {
+			t.Errorf("adding %q got %d", path, code)
+		}
+	}
+	b, _ := json.Marshal(map[string]string{"path": dir})
+	if code, v := do(t, c, "POST", base+"/api/add", string(b)); code != 200 || v["added"] != 1.0 {
+		t.Errorf("adding the folder got %d %v", code, v)
+	}
+	if len(q.Jobs()) != 1 {
+		t.Errorf("queued %+v", q.Jobs())
+	}
+}
+
+// A page that opened its event stream before there was a password is cut
+// off once one is set, and has to log in.
+func TestAStreamEndsWhenAPasswordIsSet(t *testing.T) {
+	_, _, base := setup(t)
+	resp, err := client(t).Get(base + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	ended := make(chan struct{})
+	go func() {
+		io.Copy(io.Discard, resp.Body)
+		close(ended)
+	}()
+	if code, _ := do(t, client(t), "PUT", base+"/api/password", `{"password":"correct horse"}`); code != 200 {
+		t.Fatal("setting the password failed")
+	}
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Error("the stream carried on without a login")
+	}
+}
+
+func TestSettingsChangedElsewhereAreNotOverwritten(t *testing.T) {
+	_, q, base := setup(t)
+	c := client(t)
+	_, view := do(t, c, "GET", base+"/api/settings", "")
+	s := q.Settings()
+	s.CRF = 33
+	q.SetSettings(s) // as the terminal UI would
+	b, _ := json.Marshal(view["settings"])
+	req, _ := http.NewRequest("PUT", base+"/api/settings", strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("If-Match", view["version"].(string))
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict || q.Settings().CRF != 33 {
+		t.Errorf("a stale save got %d, and left crf %d", resp.StatusCode, q.Settings().CRF)
+	}
+}
+
+func TestAQueuedJobCanRunNext(t *testing.T) {
+	_, q, base := setup(t)
+	q.Add("/nonexistent/a.mkv")
+	q.Add("/nonexistent/b.mkv")
+	if code, _ := do(t, client(t), "POST", base+"/api/jobs/1/next", "{}"); code != 200 {
+		t.Fatalf("got %d", code)
+	}
+	jobs := q.Jobs()
+	if jobs[0].Next || !jobs[1].Next || encode.RunOrder(jobs[1], jobs[0]) >= 0 {
+		t.Errorf("b isn't first: %+v", jobs)
+	}
+}
+
+// Before anything is watched there's no history, which reads as empty.
+func TestNoHistoryYetIsEmpty(t *testing.T) {
+	_, _, base := setup(t)
+	if code, v := do(t, client(t), "GET", base+"/api/stats?days=30&tz=-240", ""); code != 200 || v["totals"] == nil {
+		t.Errorf("stats got %d %v", code, v)
+	}
+	if code, v := do(t, client(t), "GET", base+"/api/history", ""); code != 200 || len(v["entries"].([]any)) != 0 {
+		t.Errorf("history got %d %v", code, v)
+	}
+}

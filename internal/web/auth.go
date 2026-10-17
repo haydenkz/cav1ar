@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -97,6 +98,11 @@ func (s *Server) guard(next http.Handler) http.Handler {
 			}
 		}
 		hash := s.o.Queue.Settings().WebPassword
+		if hash == "" && !trustedHost(r.Host) {
+			errorJSON(w, http.StatusForbidden, fmt.Errorf("cav1ar has no password yet, so it only answers to its address "+
+				"(such as http://192.168.1.10:6767), not to %s; set a password to use that name", r.Host))
+			return
+		}
 		open := r.URL.Path == "/api/auth" || r.URL.Path == "/api/login"
 		if hash != "" && !open && !s.loggedIn(r, hash) {
 			errorJSON(w, http.StatusUnauthorized, errors.New("log in first"))
@@ -104,6 +110,31 @@ func (s *Server) guard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// trustedHost reports whether host, from a request's Host header, names
+// this machine in a way no web site can take over: an IP address, localhost,
+// or a name public DNS doesn't hand out (one without a dot, or under .local,
+// .lan, .home.arpa, .internal or .ts.net). With no password set, the API
+// answers only to these, so a site can't point a name of its own at this
+// address (DNS rebinding) and drive cav1ar from a visitor's browser.
+func trustedHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+	if host == "" {
+		return false
+	}
+	if net.ParseIP(host) != nil || host == "localhost" || !strings.Contains(host, ".") {
+		return true
+	}
+	for _, private := range []string{".localhost", ".local", ".lan", ".home.arpa", ".internal", ".ts.net"} {
+		if strings.HasSuffix(host, private) {
+			return true
+		}
+	}
+	return false
 }
 
 // loadKey reads the key that signs logins, making one the first time.
