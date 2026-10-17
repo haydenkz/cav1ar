@@ -254,22 +254,39 @@ func TestEveryEncoderOffIsRefused(t *testing.T) {
 	}
 }
 
-// Encoders are listed by machine, and a worker's CPU only once it's on.
+// Encoders are listed by machine. The CPU of a worker with a GPU shows only
+// once it's on; that of a worker with only a CPU always does.
 func TestEncodersAreGroupedByMachine(t *testing.T) {
 	m, q := newTestModel(t)
 	q.devices = append(slices.Clone(testDevices),
 		encode.Device{ID: "w/vaapi:x", Kind: encode.EncoderVAAPI, Name: "Test Arc (w)", Worker: "w"},
-		encode.Device{ID: "w/cpu", Kind: encode.EncoderCPU, Name: "CPU (w)", Worker: "w"})
+		encode.Device{ID: "w/cpu", Kind: encode.EncoderCPU, Name: "CPU (w)", Worker: "w"},
+		encode.Device{ID: "c/cpu", Kind: encode.EncoderCPU, Name: "CPU (c)", Worker: "c"})
 	m = press(m, "s", "tab")
 	var got []string
 	for _, g := range m.draft.encoderGroups() {
 		got = append(got, g.title, fmt.Sprint(g.devices))
 	}
-	if want := []string{"── This machine", "[0 1]", "── w · worker", "[2]"}; !slices.Equal(got, want) {
+	if want := []string{"── This machine", "[0 1]", "── w · worker", "[2]", "── c · worker", "[4]"}; !slices.Equal(got, want) {
 		t.Errorf("groups %q, want %q", got, want)
 	}
 	m.draft.slots[3] = 1
-	if g := m.draft.encoderGroups(); len(g) != 2 || len(g[1].devices) != 2 {
+	if g := m.draft.encoderGroups(); len(g) != 3 || len(g[1].devices) != 2 {
 		t.Error("a worker's CPU that's on should show")
+	}
+}
+
+// An AMD/Intel GPU's speed shows under it, as NVIDIA's does under theirs.
+func TestVAAPISpeedShowsUnderItsGPU(t *testing.T) {
+	m, q := newTestModel(t)
+	q.devices = append(slices.Clone(testDevices),
+		encode.Device{ID: "w/vaapi:x", Kind: encode.EncoderVAAPI, Name: "Test Arc (w)", Worker: "w"})
+	m = press(m, "s", "tab")
+	var keys []string
+	for _, f := range m.sectionFields(m.section) {
+		keys = append(keys, f.GetKey())
+	}
+	if i := slices.Index(keys, "slots2"); i < 0 || i+1 >= len(keys) || keys[i+1] != "vaapiPreset" {
+		t.Errorf("fields %q; want vaapiPreset right after the Arc", keys)
 	}
 }

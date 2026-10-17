@@ -4,6 +4,7 @@ import (
 	"context"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +64,14 @@ func TestVAAPIDecodesOnItsGPU(t *testing.T) {
 	}
 	if !hasArgs(after, "-global_quality:v", "54") || !hasArgs(after, "-vf", "scale_vaapi=w=1920:h=1080:format=p010") {
 		t.Errorf("encoding options %q", after)
+	}
+	if slices.Contains(after, "-compression_level:v") {
+		t.Errorf("the driver's own speed was overridden: %q", after)
+	}
+	s := DefaultSettings()
+	s.VAAPIPreset = 2
+	if _, after := videoArgs(s, testArc, v, 1920, 1080, true); !hasArgs(after, "-compression_level:v", "2") {
+		t.Errorf("speed 2 wasn't passed on: %q", after)
 	}
 	before, after = videoArgs(DefaultSettings(), testArc, v, 1280, 720, false)
 	if !hasArgs(before, "-vaapi_device", "/dev/dri/renderD128") || !hasArgs(after, "-vf", "scale=1280:720:flags=lanczos,format=p010,hwupload") {

@@ -106,13 +106,20 @@ type deviceGroup struct {
 }
 
 // encoderGroups groups the devices by machine, this one first, then each
-// worker's in the order they joined. A worker's CPU is left out unless it
-// has been turned on, since lending a CPU is never worth it.
+// worker's in the order they joined. The CPU of a worker with a GPU is left
+// out unless it has been turned on, since its GPU is always the better
+// choice there; a worker with only a CPU shows it.
 func (d *settingsDraft) encoderGroups() []deviceGroup {
+	hasGPU := map[string]bool{}
+	for _, dev := range d.devices {
+		if dev.GPU() {
+			hasGPU[dev.Worker] = true
+		}
+	}
 	groups := []deviceGroup{{title: "── This machine"}}
 	at := map[string]int{"": 0}
 	for i, dev := range d.devices {
-		if dev.Worker != "" && !dev.GPU() && d.slots[i] <= 0 {
+		if dev.Worker != "" && !dev.GPU() && hasGPU[dev.Worker] && d.slots[i] <= 0 {
 			continue
 		}
 		g, ok := at[dev.Worker]
@@ -277,7 +284,7 @@ func (m *Model) sectionFields(section int) []huh.Field {
 				nvidias++
 			}
 		}
-		nvencShown, svtShown := false, false
+		nvencShown, svtShown, vaapiShown := false, false, false
 		for _, g := range d.encoderGroups() {
 			fields = append(fields, huh.NewNote().Title(g.title))
 			for _, i := range g.devices {
@@ -308,6 +315,14 @@ func (m *Model) sectionFields(section int) []huh.Field {
 					}
 					fields = append(fields, huh.NewSelect[int]().Key("nvencPreset").Title(title).
 						Options(presets...).Value(&d.NVENCPreset).Inline(true))
+				case dev.Kind == encode.EncoderVAAPI && !vaapiShown:
+					vaapiShown = true
+					levels := []huh.Option[int]{option("driver default", 0, rec.VAAPIPreset)}
+					for p := 1; p <= 7; p++ {
+						levels = append(levels, option(vaapiPresetLabel(p), p, rec.VAAPIPreset))
+					}
+					fields = append(fields, huh.NewSelect[int]().Key("vaapiPreset").Title("  speed").
+						Options(levels...).Value(&d.VAAPIPreset).Inline(true))
 				case dev.Kind == encode.EncoderCPU && !svtShown:
 					svtShown = true
 					presets := make([]huh.Option[int], 0, 14)
@@ -411,6 +426,9 @@ func (m *Model) fieldHelp(key string) string {
 			"Each encoder is set to give about the same quality for the same number. Recommended: %d.", rec.CRF)
 	case "preset", "nvencPreset":
 		return "Slower makes smaller files at the same quality."
+	case "vaapiPreset":
+		return "On an Intel Arc, the level barely changes the size or quality, only the speed, so the driver's " +
+			"default is best. AMD drivers count their levels differently."
 	case "maxHeight":
 		return "Bigger video is scaled down to fit. AV1 video that already fits is copied, not re-encoded."
 	case "audio":
@@ -722,6 +740,19 @@ func presetLabel(p int) string {
 		speed = "fast"
 	default:
 		speed = "fastest, biggest files"
+	}
+	return fmt.Sprintf("%d · %s", p, speed)
+}
+
+func vaapiPresetLabel(p int) string {
+	var speed string
+	switch {
+	case p <= 2:
+		speed = "slowest"
+	case p <= 5:
+		speed = "balanced"
+	default:
+		speed = "fastest"
 	}
 	return fmt.Sprintf("%d · %s", p, speed)
 }
