@@ -1,0 +1,97 @@
+# Radarr and Sonarr find releases, SABnzbd and qBittorrent download them, and
+# cav1ar keeps the library they import into encoded to AV1.
+#
+# Every app sees the same folder as /data, so imports are hardlinks, not
+# copies:
+#   /data/usenet          SABnzbd's downloads
+#   /data/torrents        qBittorrent's downloads
+#   /data/media/movies    the movies Radarr imports
+#   /data/media/tv        the shows Sonarr imports
+#
+# Copy .env.example to .env and set it up, then `docker compose up -d`, or
+# paste both into a new Dockge stack. examples/stack/README.md says how to
+# connect the apps once they're up.
+
+x-common: &common
+  restart: unless-stopped
+  environment: &env
+    PUID: ${PUID}
+    PGID: ${PGID}
+    TZ: ${TZ}
+
+services:
+  radarr:
+    <<: *common
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    volumes:
+      - ${CONFIG}/radarr:/config
+      - ${DATA}:/data
+    ports:
+      - 7878:7878
+
+  sonarr:
+    <<: *common
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    volumes:
+      - ${CONFIG}/sonarr:/config
+      - ${DATA}:/data
+    ports:
+      - 8989:8989
+
+  sabnzbd:
+    <<: *common
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: sabnzbd
+    volumes:
+      - ${CONFIG}/sabnzbd:/config
+      - ${DATA}:/data
+    ports:
+      - 8080:8080
+
+  qbittorrent:
+    <<: *common
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      <<: *env
+      WEBUI_PORT: 8090
+      TORRENTING_PORT: 6881
+    volumes:
+      - ${CONFIG}/qbittorrent:/config
+      - ${DATA}:/data
+    ports:
+      - 8090:8090
+      - 6881:6881
+      - 6881:6881/udp
+
+  cav1ar:
+    <<: *common
+    image: ghcr.io/haydenkz/cav1ar:latest
+    container_name: cav1ar
+    environment:
+      <<: *env
+      # On the first run, watch the library's folders.
+      CAV1AR_MOVIES: /data/media/movies
+      CAV1AR_SHOWS: /data/media/tv
+    volumes:
+      - ${CONFIG}/cav1ar:/config
+      - ${DATA}:/data
+    ports:
+      - 6767:6767
+    # Give cav1ar a GPU by uncommenting one of these; without one it encodes
+    # on the CPU, which is many times slower.
+    #
+    # An Intel or AMD GPU:
+    # devices:
+    #   - /dev/dri:/dev/dri
+    #
+    # An NVIDIA GPU, with the NVIDIA Container Toolkit installed on the host:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
