@@ -2,6 +2,7 @@ package encode
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -181,5 +182,36 @@ func TestJobsGoBackWhenTheirWorkerGoes(t *testing.T) {
 		case <-deadline:
 			t.Fatal("the job never went back in the queue")
 		}
+	}
+}
+
+// The history reads databases from before jobs recorded their device, and
+// after, newest first.
+func TestHistoryReadsOldAndNewDatabases(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cav1ar.db")
+	db, err := openState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.addJob(Job{Input: "/a.mkv", Output: "/a.av1.mkv", Action: ActionEncode, Device: "GPU", Started: time.Unix(100, 0), Finished: time.Unix(200, 0)}, "done")
+	db.addJob(Job{Input: "/b.mkv", Action: ActionEncode, Err: errors.New("broke")}, "failed")
+	db.Close()
+
+	h, err := OpenHistory(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	all, err := h.Recent(context.Background(), 0, 10, "")
+	if err != nil || len(all) != 2 || all[0].Input != "/b.mkv" || all[1].Device != "GPU" || all[1].Finished.Unix() != 200 {
+		t.Fatalf("got %+v, %v", all, err)
+	}
+	failed, _ := h.Recent(context.Background(), 0, 10, "failed")
+	if len(failed) != 1 || failed[0].Err != "broke" {
+		t.Errorf("failed only: %+v", failed)
+	}
+	older, _ := h.Recent(context.Background(), all[0].ID, 10, "")
+	if len(older) != 1 || older[0].Input != "/a.mkv" {
+		t.Errorf("before the newest: %+v", older)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/haydenkz/cav1ar/internal/config"
 	"github.com/haydenkz/cav1ar/internal/encode"
 	"github.com/haydenkz/cav1ar/internal/remote"
+	"github.com/haydenkz/cav1ar/internal/web"
 )
 
 // runDaemon encodes without the UI, logging a line as each job starts and
@@ -44,6 +46,14 @@ func runDaemon(ctx context.Context, q *encode.Queue, w *encode.Watcher, batch bo
 			defer ws.Close()
 		}
 	}
+	var webUI *web.Server
+	if s.WebListen != "" {
+		if webUI, err = serveWeb(s, q, w, srv); err != nil {
+			log.Printf("cav1ar: can't serve the web UI: %v", err)
+		} else {
+			defer webUI.Close()
+		}
+	}
 	go followSettings(ctx, q, srv)
 	time.AfterFunc(2*time.Second, func() {
 		if len(q.Settings().Watch) > 0 && !w.Active() {
@@ -63,6 +73,9 @@ func runDaemon(ctx context.Context, q *encode.Queue, w *encode.Watcher, batch bo
 		}
 		if srv != nil {
 			srv.Publish(evs)
+		}
+		if webUI != nil {
+			webUI.Publish(evs)
 		}
 		if batch && len(q.Settings().Watch) == 0 && allFinished(q.Jobs()) {
 			return nil
@@ -156,6 +169,9 @@ func followSettings(ctx context.Context, q *encode.Queue, srv *remote.Server) {
 				log.Printf("cav1ar: ignoring changed settings: %v", err)
 				continue
 			}
+			if reflect.DeepEqual(s, q.Settings()) { // saved from the web UI, which put them into effect already
+				continue
+			}
 			q.SetSettings(s)
 			if srv != nil {
 				srv.SetSettings(s)
@@ -165,6 +181,42 @@ func followSettings(ctx context.Context, q *encode.Queue, srv *remote.Server) {
 			logWatch(s)
 		}
 	}
+}
+
+// serveWeb starts serving the web UI, which saves settings and puts them
+// into effect straight away.
+func serveWeb(s encode.Settings, q *encode.Queue, w *encode.Watcher, srv *remote.Server) (*web.Server, error) {
+	statePath, err := config.StatePath()
+	if err != nil {
+		return nil, err
+	}
+	keyPath, err := config.WebKeyPath()
+	if err != nil {
+		return nil, err
+	}
+	apply := func(s encode.Settings) error {
+		if err := config.Save(s); err != nil {
+			return err
+		}
+		q.SetSettings(s)
+		if srv != nil {
+			srv.SetSettings(s)
+		}
+		log.Printf("cav1ar: settings changed in the web UI: %s", s.Summary())
+		log.Printf("cav1ar: encoding on %s", s.DeviceSummary(q.Devices()))
+		return nil
+	}
+	ui, err := web.Listen(web.Options{Addr: s.WebListen, Queue: q, Watcher: w, StatePath: statePath,
+		KeyPath: keyPath, Apply: apply, Version: version})
+	if err != nil {
+		return nil, err
+	}
+	if s.WebPassword == "" {
+		log.Printf("cav1ar: serving the web UI on %s, with no password yet; set one in its settings", ui.Addr())
+	} else {
+		log.Printf("cav1ar: serving the web UI on %s", ui.Addr())
+	}
+	return ui, nil
 }
 
 func logWatch(s encode.Settings) {

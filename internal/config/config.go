@@ -41,6 +41,9 @@ func WorkerToken(create bool) (token, path string, err error) {
 	return token, path, os.WriteFile(path, []byte(token+"\n"), 0o600)
 }
 
+// WebKeyPath is where the key that signs the web UI's logins is kept.
+func WebKeyPath() (string, error) { return file("web-key") }
+
 func file(name string) (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {

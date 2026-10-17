@@ -131,6 +131,12 @@ type Settings struct {
 	// path, for the files workers write.
 	WorkerListen string `json:"worker_listen,omitempty"`
 	WorkerDir    string `json:"worker_dir,omitempty"`
+
+	// The web UI; see package web. WebListen is the address a daemon serves
+	// it on, :6767 unless set, or empty for none. WebPassword is a hash of
+	// the password it asks for, or empty to ask for none.
+	WebListen   string `json:"web_listen"`
+	WebPassword string `json:"web_password,omitempty"`
 }
 
 // Special AudioKbps values.
@@ -152,8 +158,12 @@ func DefaultSettings() Settings {
 		AudioTracks:  KeepAll,
 		Subtitles:    KeepAll,
 		NameTemplate: DefaultNameTemplate,
+		WebListen:    DefaultWebListen,
 	}
 }
+
+// DefaultWebListen is where a daemon serves the web UI unless told otherwise.
+const DefaultWebListen = ":6767"
 
 // Recommended returns s with the recommended choice for every setting that
 // has one, including keeping originals. Personal settings are kept: language,
