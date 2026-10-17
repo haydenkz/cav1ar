@@ -198,7 +198,9 @@ func prerollFor(ctx context.Context, s Settings, d Device, mainPath string, main
 			"-rc-lookahead", "32", "-spatial-aq", "1", "-temporal-aq", "1", "-g", "240")
 		args = append(args, levelTier...)
 	case vaapi:
-		args = append(args, "-c:v", "av1_vaapi", "-rc_mode", "CQP", "-global_quality:v", strconv.Itoa(vaapiQP(s.CRF)), "-g", "240")
+		args = append(args, "-c:v", "av1_vaapi")
+		args = append(args, vaapiRate(s.CRF, resolution(v.Width, v.Height))...)
+		args = append(args, "-g", "240")
 		if s.VAAPIPreset > 0 {
 			args = append(args, "-compression_level:v", strconv.Itoa(s.VAAPIPreset))
 		}

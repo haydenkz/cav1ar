@@ -277,17 +277,40 @@ var ErrNoEncoder = errors.New("nothing here can encode AV1: ffmpeg needs SVT-AV1
 	"or a GPU that can encode AV1 with its driver installed")
 
 // The quality setting is on NVENC's scale, and the other encoders are set to
-// match it, as scored with VMAF on 1080p clips: SVT-AV1 at the recommended
-// preset lands within half a point of NVENC at both 30 and 34, and VAAPI,
-// on an Intel Arc, within half a point at 30 on drama, animation and
-// reality TV alike.
+// match it, as scored with VMAF on 1080p clips, frame by frame: at quality
+// 30, SVT-AV1 at the recommended preset lands within about half a point of
+// NVENC on drama, reality TV and animation, in files 40–55% smaller. For
+// VAAPI, see vaapiRate.
 
 // svtCRF is SVT-AV1's CRF for quality q.
-func svtCRF(q int) int { return min(max(q-3, 1), 63) }
+func svtCRF(q int) int { return min(max(q-7, 1), 63) }
 
-// vaapiQP is the AV1 quantizer, 0–255, that VAAPI's constant quality mode
-// uses for quality q.
+// vaapiQP is the AV1 quantizer, 0–255, that matches NVENC's quality q on
+// clean video, which is as fine as VAAPI goes; see vaapiRate.
 func vaapiQP(q int) int { return min(max(int(math.Round(4.5*float64(q)))-81, 1), 255) }
+
+// vaapiRate is VAAPI's rate control for quality q at resolution res.
+//
+// NVENC's quality mode works like a CRF, quantizing grain more coarsely,
+// where VAAPI's constant quantizer spends whatever grain takes: on grainy
+// Blu-rays, the quantizer that matched NVENC ran from 76 to 95, against 42
+// on a clean source, and an Intel Arc's results came out 1.8 times NVENC's
+// size. So VAAPI aims at a bitrate that follows NVENC's for the quality,
+// halving for every 6 steps up, and holds a floor on the quantizer, so easy
+// video isn't given more than it needs. Scored with VMAF on 1080p Blu-rays
+// against NVENC, that lands within half a point at 30, in files 5–25%
+// smaller, and within a point at 26 and 34. ffmpeg's qmin goes no higher
+// than 69.
+func vaapiRate(q int, res string) []string {
+	ceiling := float64(nvencMaxRate(res)) // Mbit/s
+	target := ceiling * 5 / 12 * math.Pow(2, float64(30-q)/6)
+	maxRate := max(ceiling, 2*target)
+	kbps := func(mbps float64) string { return strconv.Itoa(int(math.Round(mbps*1000))) + "k" }
+	// They're options every encoder has, so they must name the video's, or
+	// the audio encoder takes them too.
+	return []string{"-rc_mode", "VBR", "-b:v", kbps(target), "-maxrate:v", kbps(maxRate), "-bufsize:v", kbps(2 * maxRate),
+		"-qmin:v", strconv.Itoa(min(vaapiQP(q), 69))}
+}
 
 // videoArgs are the ffmpeg options that encode v on d at width x height.
 // Quality and speed are mapped onto each encoder's own scale. hwDecode
@@ -327,9 +350,8 @@ func videoArgs(s Settings, d Device, v streamInfo, width, height int, hwDecode b
 			beforeInput = []string{"-vaapi_device", d.Path}
 			filters = append(cpuFilters(v, width, height, scale), "format=p010", "hwupload")
 		}
-		// global_quality is an option every encoder has, so it must name the
-		// video's, or the audio encoder takes it too and Opus refuses it.
-		afterInput = []string{"-c:v", "av1_vaapi", "-rc_mode", "CQP", "-global_quality:v", strconv.Itoa(vaapiQP(s.CRF)), "-g", "240"}
+		afterInput = append([]string{"-c:v", "av1_vaapi"}, vaapiRate(s.CRF, resolution(width, height))...)
+		afterInput = append(afterInput, "-g", "240")
 		// The driver's speed level, which, like global_quality, the audio
 		// encoder would take too if it didn't name the video's. On an Intel
 		// Arc it hardly changes the size or quality, only the speed.

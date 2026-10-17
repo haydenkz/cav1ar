@@ -44,8 +44,8 @@ func TestSlotsDefaultsAndOverrides(t *testing.T) {
 // numbers calibrated, they give about the same quality, and better quality
 // always means a lower number on every scale.
 func TestQualityMapsOntoEachEncoder(t *testing.T) {
-	if svtCRF(30) != 27 || vaapiQP(30) != 54 || vaapiQP(34) != 72 {
-		t.Errorf("30 maps to CRF %d and QP %d, and 34 to QP %d; want 27, 54 and 72", svtCRF(30), vaapiQP(30), vaapiQP(34))
+	if svtCRF(30) != 23 || vaapiQP(30) != 54 || vaapiQP(34) != 72 {
+		t.Errorf("30 maps to CRF %d and QP %d, and 34 to QP %d; want 23, 54 and 72", svtCRF(30), vaapiQP(30), vaapiQP(34))
 	}
 	for q := 2; q <= 63; q++ {
 		if svtCRF(q) < svtCRF(q-1) || vaapiQP(q) < vaapiQP(q-1) {
@@ -63,7 +63,7 @@ func TestVAAPIDecodesOnItsGPU(t *testing.T) {
 	if !hasArgs(before, "-init_hw_device", "vaapi=gpu:/dev/dri/renderD128") || !hasArgs(before, "-hwaccel", "vaapi") {
 		t.Errorf("decoding on the GPU should open it for the decoder too: %q", before)
 	}
-	if !hasArgs(after, "-global_quality:v", "54") || !hasArgs(after, "-vf", "scale_vaapi=w=1920:h=1080:format=p010") {
+	if !hasArgs(after, "-rc_mode", "VBR") || !hasArgs(after, "-qmin:v", "54") || !hasArgs(after, "-vf", "scale_vaapi=w=1920:h=1080:format=p010") {
 		t.Errorf("encoding options %q", after)
 	}
 	if slices.Contains(after, "-compression_level:v") {
@@ -213,5 +213,25 @@ func TestHistoryReadsOldAndNewDatabases(t *testing.T) {
 	older, _ := h.Recent(context.Background(), all[0].ID, 10, "")
 	if len(older) != 1 || older[0].Input != "/a.mkv" {
 		t.Errorf("before the newest: %+v", older)
+	}
+}
+
+// VAAPI aims at a bitrate that follows NVENC's for the quality, with a floor
+// on the quantizer that ffmpeg caps at 69.
+func TestVAAPIRateFollowsTheQuality(t *testing.T) {
+	for _, c := range []struct {
+		q                       int
+		res                     string
+		target, max, buf, floor string
+	}{
+		{30, "1080p", "5000k", "12000k", "24000k", "54"},
+		{34, "1080p", "3150k", "12000k", "24000k", "69"},
+		{26, "1080p", "7937k", "15874k", "31748k", "36"},
+		{30, "2160p", "12500k", "30000k", "60000k", "54"},
+	} {
+		got := vaapiRate(c.q, c.res)
+		if !hasArgs(got, "-b:v", c.target) || !hasArgs(got, "-maxrate:v", c.max) || !hasArgs(got, "-bufsize:v", c.buf) || !hasArgs(got, "-qmin:v", c.floor) {
+			t.Errorf("quality %d at %s: %q", c.q, c.res, got)
+		}
 	}
 }
