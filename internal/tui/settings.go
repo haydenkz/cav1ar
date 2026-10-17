@@ -91,16 +91,42 @@ func (d *settingsDraft) encoders() map[string]int {
 	return enc
 }
 
-// on reports whether the draft has a device of kind k encoding.
-func (d *settingsDraft) on(k encode.Encoder) bool {
+// onDevice reports whether the draft has device i encoding.
+func (d *settingsDraft) onDevice(i int) bool {
 	s := d.Settings
 	s.Encoders = d.encoders()
-	for _, dev := range d.devices {
-		if dev.Kind == k && s.Slots(dev, d.devices) > 0 {
-			return true
+	return s.Slots(d.devices[i], d.devices) > 0
+}
+
+// deviceGroup is the devices of one machine, as the Encoders section shows
+// them: indexes into the draft's devices.
+type deviceGroup struct {
+	title   string
+	devices []int
+}
+
+// encoderGroups groups the devices by machine, this one first, then each
+// worker's in the order they joined. A worker's CPU is left out unless it
+// has been turned on, since lending a CPU is never worth it.
+func (d *settingsDraft) encoderGroups() []deviceGroup {
+	groups := []deviceGroup{{title: "── This machine"}}
+	at := map[string]int{"": 0}
+	for i, dev := range d.devices {
+		if dev.Worker != "" && !dev.GPU() && d.slots[i] <= 0 {
+			continue
 		}
+		g, ok := at[dev.Worker]
+		if !ok {
+			g = len(groups)
+			at[dev.Worker] = g
+			groups = append(groups, deviceGroup{title: "── " + dev.Worker + " · worker"})
+		}
+		groups[g].devices = append(groups[g].devices, i)
 	}
-	return false
+	if len(groups[0].devices) == 0 {
+		groups = groups[1:]
+	}
+	return groups
 }
 
 // settings is the draft as settings to save, or why it can't be saved yet
@@ -114,7 +140,7 @@ func (d *settingsDraft) settings() (encode.Settings, int, error) {
 	s.CRF = crf
 	s.Encoders = d.encoders()
 	if len(d.devices) > 0 && !slices.ContainsFunc(d.devices, func(dev encode.Device) bool { return s.Slots(dev, d.devices) > 0 }) {
-		return s, sectionVideo, errors.New("every encoder is off; turn one on")
+		return s, sectionEncoders, errors.New("every encoder is off; turn one on")
 	}
 	if d.audio.kbps != encode.AudioCopy { // copying keeps the codec chosen before
 		s.AudioCodec = d.audio.codec
@@ -160,6 +186,7 @@ func (d *settingsDraft) settings() (encode.Settings, int, error) {
 // last is a form of its own; the last is the list of watched folders.
 const (
 	sectionVideo = iota
+	sectionEncoders
 	sectionAudio
 	sectionSubtitles
 	sectionNaming
@@ -167,7 +194,7 @@ const (
 	sectionFolders
 )
 
-var sectionNames = []string{"Video", "Audio", "Subtitles", "Naming", "Output", "Folders"}
+var sectionNames = []string{"Video", "Encoders", "Audio", "Subtitles", "Naming", "Output", "Folders"}
 
 // openSettings shows the settings screen, editing d, at section.
 func (m *Model) openSettings(d *settingsDraft, section int) tea.Cmd {
@@ -200,7 +227,11 @@ func (m *Model) showSection(i int) tea.Cmd {
 // the form can be rebuilt when one of them changes.
 func (m *Model) dependsOn() string {
 	d := m.draft
-	return fmt.Sprint(d.on(encode.EncoderCPU), d.on(encode.EncoderNVIDIA), d.audio.kbps == encode.AudioCopy, d.Subtitles == encode.KeepNone)
+	on := make([]bool, len(d.devices))
+	for i := range d.devices {
+		on[i] = d.onDevice(i)
+	}
+	return fmt.Sprint(on, d.audio.kbps == encode.AudioCopy, d.Subtitles == encode.KeepNone)
 }
 
 // settingsFormKeys moves between fields with the arrows and enter, leaving
@@ -224,48 +255,71 @@ func (m *Model) sectionFields(section int) []huh.Field {
 	rec := d.Settings.Recommended()
 	switch section {
 	case sectionVideo:
-		var fields []huh.Field
-		for i, dev := range d.devices {
-			auto := "auto · 2 at once"
-			if !dev.GPU() {
-				auto = "auto · off while a GPU encodes"
-			}
-			opts := []huh.Option[int]{option(auto, slotsAuto, slotsAuto), option("off", 0, slotsAuto)}
-			for n := 1; n <= max(8, d.slots[i]); n++ {
-				opts = append(opts, option(fmt.Sprintf("%d at once", n), n, slotsAuto))
-			}
-			fields = append(fields, huh.NewSelect[int]().Key(fmt.Sprintf("slots%d", i)).Title(dev.Name).
-				Options(opts...).Value(&d.slots[i]).Inline(true))
-		}
-		if len(d.devices) == 0 {
-			fields = append(fields, huh.NewNote().Title("Encoders").Description(encode.ErrNoEncoder.Error()))
-		}
-		fields = append(fields, huh.NewInput().Key("crf").Title("Quality").CharLimit(2).Value(&d.crf).
-			Validate(func(s string) error { _, err := parseCRF(s); return err }))
-		if d.on(encode.EncoderNVIDIA) {
-			presets := make([]huh.Option[int], 0, 7)
-			for p := 1; p <= 7; p++ {
-				presets = append(presets, option(nvencPresetLabel(p), p, rec.NVENCPreset))
-			}
-			fields = append(fields, huh.NewSelect[int]().Key("nvencPreset").Title("NVIDIA speed").
-				Options(presets...).Value(&d.NVENCPreset).Inline(true))
-		}
-		if d.on(encode.EncoderCPU) {
-			presets := make([]huh.Option[int], 0, 14)
-			for p := 0; p <= 13; p++ {
-				presets = append(presets, option(presetLabel(p), p, rec.Preset))
-			}
-			fields = append(fields, huh.NewSelect[int]().Key("preset").Title("CPU speed").
-				Options(presets...).Value(&d.Preset).Inline(true))
-		}
-		maxHeights := []huh.Option[int]{option("keep original", 0, rec.MaxHeight)}
+		maxHeights := []huh.Option[int]{huh.NewOption("keep original", 0)}
 		for _, h := range encode.MaxHeights {
-			maxHeights = append(maxHeights, option(fmt.Sprintf("scale down to %dp", h), h, rec.MaxHeight))
+			maxHeights = append(maxHeights, huh.NewOption(fmt.Sprintf("scale down to %dp", h), h))
 		}
-		return append(fields,
+		return []huh.Field{
+			huh.NewInput().Key("crf").Title("Quality").CharLimit(2).Value(&d.crf).
+				Validate(func(s string) error { _, err := parseCRF(s); return err }),
 			huh.NewSelect[int]().Key("maxHeight").Title("Resolution").
 				Options(maxHeights...).Value(&d.MaxHeight).Inline(true),
-		)
+		}
+
+	case sectionEncoders:
+		if len(d.devices) == 0 {
+			return []huh.Field{huh.NewNote().Title("Encoders").Description(encode.ErrNoEncoder.Error())}
+		}
+		var fields []huh.Field
+		nvidias := 0
+		for _, dev := range d.devices {
+			if dev.Kind == encode.EncoderNVIDIA {
+				nvidias++
+			}
+		}
+		nvencShown, svtShown := false, false
+		for _, g := range d.encoderGroups() {
+			fields = append(fields, huh.NewNote().Title(g.title))
+			for _, i := range g.devices {
+				dev := d.devices[i]
+				auto := "2 at once (auto)"
+				if !dev.GPU() {
+					auto = "off (auto)"
+				}
+				opts := []huh.Option[int]{huh.NewOption(auto, slotsAuto), huh.NewOption("off", 0)}
+				for n := 1; n <= max(8, d.slots[i]); n++ {
+					opts = append(opts, huh.NewOption(fmt.Sprintf("%d at once", n), n))
+				}
+				fields = append(fields, huh.NewSelect[int]().Key(fmt.Sprintf("slots%d", i)).Title(dev.Name).
+					Options(opts...).Value(&d.slots[i]).Inline(true))
+				// Each encoder's speed sits under the first of its devices that
+				// encodes, and applies to all of them.
+				switch {
+				case !d.onDevice(i):
+				case dev.Kind == encode.EncoderNVIDIA && !nvencShown:
+					nvencShown = true
+					title := "  speed"
+					if nvidias > 1 {
+						title = "  speed, for every NVIDIA GPU"
+					}
+					presets := make([]huh.Option[int], 0, 7)
+					for p := 1; p <= 7; p++ {
+						presets = append(presets, option(nvencPresetLabel(p), p, rec.NVENCPreset))
+					}
+					fields = append(fields, huh.NewSelect[int]().Key("nvencPreset").Title(title).
+						Options(presets...).Value(&d.NVENCPreset).Inline(true))
+				case dev.Kind == encode.EncoderCPU && !svtShown:
+					svtShown = true
+					presets := make([]huh.Option[int], 0, 14)
+					for p := 0; p <= 13; p++ {
+						presets = append(presets, option(presetLabel(p), p, rec.Preset))
+					}
+					fields = append(fields, huh.NewSelect[int]().Key("preset").Title("  speed").
+						Options(presets...).Value(&d.Preset).Inline(true))
+				}
+			}
+		}
+		return fields
 
 	case sectionAudio:
 		recAudio := audioChoice{rec.AudioCodec, rec.AudioKbps}
@@ -348,8 +402,8 @@ func (m *Model) fieldHelp(key string) string {
 	d := m.draft
 	rec := d.Settings.Recommended()
 	if strings.HasPrefix(key, "slots") {
-		return "How many files it encodes at once. Auto is 2 for a GPU, which keeps it busy. " +
-			"The CPU makes the smallest files at the same quality, but is many times slower, so auto leaves it off while a GPU encodes."
+		return "How many files it encodes at once. Auto is 2 for a GPU, which keeps it busy. The CPU makes the " +
+			"smallest files at the same quality, but is many times slower, so auto leaves it off while a GPU encodes."
 	}
 	switch key {
 	case "crf":
