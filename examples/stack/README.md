@@ -39,7 +39,7 @@ replaces the original under the same name, so Radarr and Sonarr keep track of
 it, and Jellyfin or Plex just sees a smaller file.
 
 - **What's already in the library** is left alone, unless you set Folders →
-  Videos already there to encode them too.
+  Videos already in a folder when it is first watched to *handle them too*.
 - **To keep the originals,** set Settings → Output → Original file → keep. The
   results then need names of their own: set Settings → Naming → File name, to
   `{title} ({year}) {episode} [AV1]` for example.
