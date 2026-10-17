@@ -33,6 +33,21 @@ cd cav1ar
 ./install.sh            # add --service to also run it in the background
 ```
 
+### Docker
+
+The image `ghcr.io/haydenkz/cav1ar` runs the daemon, with the web UI on port
+6767. It has everything cav1ar uses, from Jellyfin's ffmpeg. Give it a GPU
+with `--gpus all` for NVIDIA, or `--device /dev/dri` for Intel or AMD:
+
+```sh
+docker run -d --name cav1ar --gpus all -p 6767:6767 \
+  -e PUID=1000 -e PGID=1000 -v ./config:/config -v /srv/media:/media \
+  ghcr.io/haydenkz/cav1ar
+```
+
+[examples/stack](examples/stack) runs it alongside Radarr, Sonarr, SABnzbd and
+qBittorrent, as a compose file that also works as a Dockge stack.
+
 ## Usage
 
 ```sh
