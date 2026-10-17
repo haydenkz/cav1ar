@@ -3,12 +3,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,14 +28,13 @@ import (
 var version = "dev"
 
 func main() {
-	saved, err := config.Load()
-	if err != nil {
-		fail(1, "reading settings: %v\nFix or delete that file to continue.", err)
-	}
+	// Settings that can't be read stop the UI and the daemon, but not
+	// -version, -worker and -devices, which don't need them.
+	saved, loadErr := config.Load()
 
 	// Flags default to the saved settings and override them for this run only.
 	settings := saved
-	daemon := flag.Bool("daemon", false, "run without the UI, logging to stdout; follows the saved settings as they change")
+	daemon := flag.Bool("daemon", false, "run without the UI, logging to stderr; follows the saved settings as they change")
 	dryRun := flag.Bool("dry-run", false, "say what would be done to the files given, or in the watched folders, and exit")
 	retryFailed := flag.Bool("retry-failed", false, "in watched folders, retry videos whose jobs failed before")
 	local := flag.Bool("local", false, "open the UI with a queue of its own, even when a daemon is running")
@@ -95,6 +96,9 @@ func main() {
 	flag.Func("watch", "keep a folder's videos encoded, including in subfolders (repeatable); "+
 		"prefix movies: or shows: to name them after their folders, and a number such as +1 to run them first", func(v string) error {
 		f := encode.ParseWatchFolder(v)
+		if f.Path == "" {
+			return errors.New("give the folder to watch")
+		}
 		abs, err := filepath.Abs(f.Path)
 		f.Path = abs
 		settings.Watch = append(settings.Watch, f)
@@ -116,6 +120,11 @@ func main() {
 		fmt.Println("cav1ar", version)
 		return
 	}
+	given := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	if err := misplacedFlags(given); err != nil {
+		fail(2, "%v", err)
+	}
 	if *workFor != "" {
 		encode.FFmpeg = *ffmpeg
 		if err := runWorker(*workFor, *workerName, *allow, paths); err != nil {
@@ -124,6 +133,9 @@ func main() {
 		return
 	}
 	if *listDevices {
+		if loadErr != nil {
+			fmt.Fprintf(os.Stderr, "cav1ar: reading settings: %v\nShowing how many files each device encodes at once by default.\n", loadErr)
+		}
 		devices := encode.Devices()
 		if len(devices) == 0 {
 			fail(1, "%v", encode.ErrNoEncoder)
@@ -138,6 +150,9 @@ func main() {
 		return
 	}
 
+	if loadErr != nil {
+		fail(1, "reading settings: %v\nCorrect that in the file to continue.", loadErr)
+	}
 	if err := settings.Validate(); err != nil {
 		fail(2, "%v", err)
 	}
@@ -163,12 +178,16 @@ func main() {
 		return
 	}
 	if !*daemon && !*local {
-		if c, err := remote.Dial(); err == nil {
+		c, err := remote.Dial()
+		if err == nil {
 			cancel()
 			if err := runAttached(c, flag.Args()); err != nil {
 				fail(1, "%v", err)
 			}
 			return
+		}
+		if !errors.Is(err, remote.ErrNoDaemon) { // one is running, but can't be shown
+			fail(1, "%v", err)
 		}
 	}
 	q := encode.NewQueue(ctx, settings)
@@ -213,8 +232,47 @@ func runAttached(c *remote.Client, paths []string) error {
 	return err
 }
 
-// add queues a file, or every video in a folder and its subfolders.
+// workerFlags are the flags a worker takes. The rest say how to encode,
+// which a worker leaves to its daemon.
+var workerFlags = []string{"worker", "worker-name", "allow", "map", "ffmpeg"}
+
+// misplacedFlags says why the flags given, by name, can't all apply
+// together, rather than letting some of them be ignored.
+func misplacedFlags(given map[string]bool) error {
+	if given["worker"] {
+		var other []string
+		for name := range given {
+			if !slices.Contains(workerFlags, name) {
+				other = append(other, "-"+name)
+			}
+		}
+		if len(other) > 0 {
+			slices.Sort(other)
+			return fmt.Errorf("a worker encodes as its daemon's settings say, so %s can't apply with -worker", strings.Join(other, " "))
+		}
+		return nil
+	}
+	for _, name := range workerFlags[1:] {
+		if given[name] {
+			return fmt.Errorf("-%s only applies with -worker", name)
+		}
+	}
+	switch {
+	case given["local"] && given["daemon"]:
+		return errors.New("-local opens the UI with a queue of its own, and -daemon runs without the UI; give one or the other")
+	case given["web"] && !given["daemon"]:
+		return errors.New("-web only applies with -daemon, which serves the web UI")
+	}
+	return nil
+}
+
+// add queues a file, or every video in a folder and its subfolders, by its
+// full path: a daemon would take a relative one to be in its own folder.
 func add(q interface{ Add(string) }, path string) error {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
 	if fi, err := os.Stat(path); err != nil || !fi.IsDir() {
 		q.Add(path) // a missing file fails visibly in the queue
 		return nil

@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -27,8 +26,9 @@ import (
 // fields across updates.
 type settingsDraft struct {
 	encode.Settings
-	crf   string      // typed as text, so it can be invalid while being edited
-	audio audioChoice // codec and bitrate, picked together
+	base  encode.Settings // as they were when the screen opened; saving changes only what the screen did
+	crf   string          // typed as text, so it can be invalid while being edited
+	audio audioChoice     // codec and bitrate, picked together
 
 	// How many files each device encodes at once, or slotsAuto, as shown
 	// when the draft was made and as chosen since.
@@ -46,13 +46,14 @@ type audioChoice struct {
 }
 
 func newDraft(s encode.Settings, devices []encode.Device) *settingsDraft {
-	s.Watch = slices.Clone(s.Watch)
 	d := &settingsDraft{
 		Settings: s,
+		base:     s,
 		crf:      strconv.Itoa(s.CRF),
 		audio:    audioChoice{s.AudioCodec, s.AudioKbps},
 		devices:  devices,
 	}
+	d.Watch = slices.Clone(s.Watch) // edited in place, so not shared with base
 	for _, dev := range devices {
 		n, ok := s.Encoders[dev.ID]
 		if !ok {
@@ -184,9 +185,52 @@ func (d *settingsDraft) settings() (encode.Settings, int, error) {
 		}
 	}
 	if err := s.Validate(); err != nil {
-		return s, sectionVideo, err
+		return s, d.sectionToFix(s), err
 	}
 	return s, 0, nil
+}
+
+// sectionToFix is the section to fix when s, the draft as settings, isn't
+// valid: the first whose changes, with those of the sections before it, make
+// the settings the screen opened with invalid.
+func (d *settingsDraft) sectionToFix(s encode.Settings) int {
+	for section := range sectionFolders {
+		if applyChanges(d.base, d.base, s, section).Validate() != nil {
+			return section
+		}
+	}
+	return sectionFolders
+}
+
+// sectionOf is the section that edits each setting, by its name in
+// encode.Settings. The settings the screen doesn't edit, such as the web
+// UI's password, aren't listed, so it never changes them.
+var sectionOf = map[string]int{
+	"CRF": sectionVideo, "MaxHeight": sectionVideo,
+	"Encoders": sectionEncoders, "Preset": sectionEncoders, "NVENCPreset": sectionEncoders, "VAAPIPreset": sectionEncoders,
+	"AudioCodec": sectionAudio, "AudioKbps": sectionAudio, "Downmix": sectionAudio, "Language": sectionAudio, "AudioTracks": sectionAudio,
+	"Subtitles": sectionSubtitles, "TidySubs": sectionSubtitles,
+	"NameTemplate": sectionNaming, "Title": sectionNaming, "ReleaseGroup": sectionNaming, "StripMetadata": sectionNaming,
+	"OutDir": sectionOutput, "DeleteOriginal": sectionOutput, "Preroll": sectionOutput,
+	"Watch": sectionFolders, "WatchExisting": sectionFolders,
+}
+
+// applyChanges makes the changes from was to now, in the settings edited by
+// the sections up to last, to settings s, which may since have changed
+// elsewhere: the web UI, say, or another terminal. Whatever the screen
+// didn't change keeps the value s has.
+func applyChanges(s, was, now encode.Settings, last int) encode.Settings {
+	sv, wv, nv := reflect.ValueOf(&s).Elem(), reflect.ValueOf(was), reflect.ValueOf(now)
+	for i := range sv.NumField() {
+		section, edited := sectionOf[sv.Type().Field(i).Name]
+		if edited && section <= last && !reflect.DeepEqual(wv.Field(i).Interface(), nv.Field(i).Interface()) {
+			sv.Field(i).Set(nv.Field(i))
+		}
+	}
+	if s.AudioKbps == encode.AudioCopy {
+		s.Downmix = false // as the draft does: copied audio can't be changed
+	}
+	return s
 }
 
 // The settings sections, in the order the sidebar lists them. Each but the
@@ -502,7 +546,9 @@ func (m *Model) updateSettings(msg tea.Msg) tea.Cmd {
 		case key.Matches(k, m.keys.Save):
 			return m.saveDraft()
 		case key.Matches(k, m.keys.Recommend):
-			return tea.Batch(m.openSettings(newDraft(m.draft.Settings.Recommended(), m.draft.devices), m.section),
+			d := newDraft(m.draft.Settings.Recommended(), m.draft.devices)
+			d.base = m.draft.base // the recommendations are changes, like any other
+			return tea.Batch(m.openSettings(d, m.section),
 				m.setStatus("Filled in the recommended settings. Look them over, then ctrl+s to save.", false))
 		case key.Matches(k, m.keys.Back):
 			if m.confirmDiscard || !m.draftChanged() {
@@ -556,15 +602,16 @@ func (m *Model) saveDraft() tea.Cmd {
 		}
 		return tea.Batch(cmd, m.setStatus("Can't save yet: "+err.Error(), true))
 	}
+	was := m.draft.base
 	m.closeSettings()
-	return m.applySettings(s)
+	return m.applySettings(was, s)
 }
 
 // draftChanged reports whether saving the draft would change the settings.
 // One that can't be saved yet has been changed.
 func (m *Model) draftChanged() bool {
 	s, _, err := m.draft.settings()
-	return err != nil || !reflect.DeepEqual(s, m.settings)
+	return err != nil || !reflect.DeepEqual(s, m.draft.base)
 }
 
 func (m *Model) closeSettings() {
@@ -682,7 +729,11 @@ func (m Model) foldersView(w int) (string, string) {
 	if d.WatchExisting {
 		existing = "handle them too"
 	}
-	if d.WatchExisting == d.Settings.Recommended().WatchExisting {
+	// Recommended leaves some settings as they were, as the user's to
+	// choose, so a choice is marked only if Recommended makes it whatever
+	// the setting was.
+	rec := encode.Settings{}.Recommended().WatchExisting
+	if rec == (encode.Settings{WatchExisting: true}).Recommended().WatchExisting && d.WatchExisting == rec {
 		existing += " (recommended)"
 	}
 	opt := cell("Videos already in a folder when it is first watched: "+existing, w-2)
@@ -711,20 +762,28 @@ func wrap(s string, w int) string {
 	return strings.Join(out, "\n")
 }
 
-// applySettings saves s and says so in the footer.
-func (m *Model) applySettings(s encode.Settings) tea.Cmd {
-	if err := m.saveSettings(s); err != nil {
+// applySettings saves the changes made on the settings screen, from was to
+// s, and says so in the footer.
+func (m *Model) applySettings(was, s encode.Settings) tea.Cmd {
+	if err := m.saveSettings(was, s); err != nil {
 		return m.setStatus("Settings applied, but couldn't be saved: "+err.Error(), true)
 	}
 	return m.setStatus("Settings saved. Jobs that haven't started will use them.", false)
 }
 
-// saveSettings applies s to the queue and the folder watcher, and saves it
-// for next time.
-func (m *Model) saveSettings(s encode.Settings) error {
-	m.settings = s
-	m.queue.SetSettings(s)
-	return config.Save(s)
+// saveSettings applies the changes made on the settings screen, from was to
+// s, to the queue and the folder watcher, and saves them for next time. They
+// are applied to the settings as they are now, so what changed elsewhere
+// while the screen was open, such as the web UI's password or its watched
+// folders, stays changed unless the screen changed it too.
+func (m *Model) saveSettings(was, s encode.Settings) error {
+	m.settings = applyChanges(m.queue.Settings(), was, s, sectionFolders)
+	m.queue.SetSettings(m.settings)
+	saved, err := config.Load()
+	if err != nil {
+		return err
+	}
+	return config.Save(applyChanges(saved, was, s, sectionFolders))
 }
 
 func presetLabel(p int) string {
@@ -772,9 +831,12 @@ func nvencPresetLabel(p int) string {
 	return fmt.Sprintf("p%d · %s", p, speed)
 }
 
+// validateLanguage accepts what encode.Settings.Validate does: 2 or 3 of
+// the letters a to z, in either case.
 func validateLanguage(s string) error {
 	s = strings.TrimSpace(s)
-	if len(s) < 2 || strings.IndexFunc(s, func(r rune) bool { return !unicode.IsLetter(r) }) >= 0 {
+	notLetter := func(r rune) bool { return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') }
+	if len(s) < 2 || len(s) > 3 || strings.ContainsFunc(s, notLetter) {
 		return errors.New("use a 2 or 3 letter code, like eng")
 	}
 	return nil

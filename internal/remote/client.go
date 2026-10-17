@@ -2,7 +2,9 @@ package remote
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"slices"
 	"sync"
@@ -10,6 +12,13 @@ import (
 
 	"github.com/haydenkz/cav1ar/internal/encode"
 )
+
+// ErrNoDaemon is the error Dial gives when no daemon is running, as opposed
+// to one that is but can't be shown.
+var ErrNoDaemon = errors.New("no cav1ar daemon is running")
+
+// errGone is why requests fail once the daemon has gone.
+var errGone = errors.New("the cav1ar daemon has gone; reopen cav1ar once it's running again")
 
 // Client is a daemon's queue as the UI sees it. It has the methods of
 // encode.Queue the UI uses, so the UI can drive either.
@@ -29,13 +38,21 @@ type Client struct {
 	saved    int64
 	results  int
 	closed   bool
+	err      error // why the latest request failed, until Err is called
 }
 
 // Dial connects to the daemon, if one is running, and reads what it has.
+// With none running, the error is ErrNoDaemon.
 func Dial() (*Client, error) {
-	nc, err := net.Dial("unix", SocketPath())
-	if err != nil {
+	path := SocketPath()
+	if err := checkOwner(path); errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%w: %w", ErrNoDaemon, err)
+	} else if err != nil {
 		return nil, err
+	}
+	nc, err := net.Dial("unix", path)
+	if err != nil { // a daemon that stopped abruptly leaves its socket behind
+		return nil, fmt.Errorf("%w: %w", ErrNoDaemon, err)
 	}
 	c := &Client{conn: nc, notify: make(chan struct{}, 1)}
 	dec := json.NewDecoder(nc)
@@ -44,6 +61,11 @@ func Dial() (*Client, error) {
 	if err := dec.Decode(&hello); err != nil {
 		nc.Close()
 		return nil, fmt.Errorf("reading from the cav1ar daemon: %w", err)
+	}
+	if hello.Version != protocol {
+		nc.Close()
+		return nil, errors.New("the cav1ar daemon running is a different version from this cav1ar; " +
+			"restart the daemon so it runs this one, or add -local to encode with a queue of the UI's own")
 	}
 	nc.SetReadDeadline(time.Time{})
 	c.apply(hello)
@@ -74,6 +96,9 @@ func (c *Client) apply(msg message) {
 	defer c.mu.Unlock()
 	if msg.Settings != nil {
 		c.settings = *msg.Settings
+	}
+	if msg.Error != "" {
+		c.err = errors.New(msg.Error)
 	}
 	c.paused, c.holding, c.watching = msg.Paused, msg.Holding, msg.Watching
 	c.devices = msg.Devices
@@ -128,14 +153,43 @@ func (c *Client) Next() []encode.Event {
 	}
 }
 
-func (c *Client) send(r request) {
+// send makes a request of the daemon, reporting whether it went. When it
+// didn't, Err says why.
+func (c *Client) send(r request) bool {
 	b, err := json.Marshal(r)
-	if err != nil {
-		return
+	if err == nil {
+		c.wmu.Lock()
+		if c.gone() {
+			err = errGone
+		} else if _, err = c.conn.Write(append(b, '\n')); err != nil {
+			err = errGone
+		}
+		c.wmu.Unlock()
 	}
-	c.wmu.Lock()
-	defer c.wmu.Unlock()
-	c.conn.Write(append(b, '\n')) // a lost connection shows up in read
+	if err != nil {
+		c.mu.Lock()
+		c.err = err
+		c.mu.Unlock()
+		return false
+	}
+	return true
+}
+
+// gone reports whether the connection to the daemon has been lost.
+func (c *Client) gone() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// Err returns why the latest request failed, if one has since Err was last
+// called: the daemon has gone, or it turned the request down.
+func (c *Client) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	err := c.err
+	c.err = nil
+	return err
 }
 
 func (c *Client) Add(path string) { c.send(request{Op: "add", Path: path}) }
@@ -143,10 +197,11 @@ func (c *Client) Cancel(id int)   { c.send(request{Op: "cancel", ID: id}) }
 func (c *Client) Retry(id int)    { c.send(request{Op: "retry", ID: id}) }
 
 func (c *Client) SetPaused(paused bool) {
-	c.mu.Lock()
-	c.paused = paused
-	c.mu.Unlock()
-	c.send(request{Op: "pause", Paused: paused})
+	if c.send(request{Op: "pause", Paused: paused}) {
+		c.mu.Lock()
+		c.paused = paused
+		c.mu.Unlock()
+	}
 }
 
 func (c *Client) Paused() bool {
@@ -156,10 +211,11 @@ func (c *Client) Paused() bool {
 }
 
 func (c *Client) SetHolding(holding bool) {
-	c.mu.Lock()
-	c.holding = holding
-	c.mu.Unlock()
-	c.send(request{Op: "hold", Holding: holding})
+	if c.send(request{Op: "hold", Holding: holding}) {
+		c.mu.Lock()
+		c.holding = holding
+		c.mu.Unlock()
+	}
 }
 
 func (c *Client) Holding() bool {

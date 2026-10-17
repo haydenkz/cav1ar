@@ -3,12 +3,14 @@ package tui
 import (
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/haydenkz/cav1ar/internal/config"
 	"github.com/haydenkz/cav1ar/internal/encode"
 )
 
@@ -17,6 +19,9 @@ type fakeQueue struct {
 	settings encode.Settings
 	devices  []encode.Device
 	saves    int
+	holding  bool
+	fail     error // what the next request to hold fails with, as a daemon's might
+	err      error // for Err
 }
 
 func (f *fakeQueue) Add(string)                    {}
@@ -24,8 +29,7 @@ func (f *fakeQueue) Cancel(int)                    {}
 func (f *fakeQueue) Retry(int)                     {}
 func (f *fakeQueue) SetPaused(bool)                {}
 func (f *fakeQueue) Paused() bool                  { return false }
-func (f *fakeQueue) SetHolding(bool)               {}
-func (f *fakeQueue) Holding() bool                 { return false }
+func (f *fakeQueue) Holding() bool                 { return f.holding }
 func (f *fakeQueue) Totals() (int64, int)          { return 0, 0 }
 func (f *fakeQueue) Jobs() []encode.Job            { return nil }
 func (f *fakeQueue) Next() []encode.Event          { return nil }
@@ -34,6 +38,13 @@ func (f *fakeQueue) SetSettings(s encode.Settings) { f.settings = s; f.saves++ }
 func (f *fakeQueue) Watching() bool                { return true }
 func (f *fakeQueue) Daemon() bool                  { return false }
 func (f *fakeQueue) Devices() []encode.Device      { return f.devices }
+func (f *fakeQueue) Err() error                    { err := f.err; f.err = nil; return err }
+
+func (f *fakeQueue) SetHolding(hold bool) {
+	if f.err, f.fail = f.fail, nil; f.err == nil {
+		f.holding = hold
+	}
+}
 
 // newTestModel is a sized model whose settings are saved under a temporary
 // folder, not the user's.
@@ -55,29 +66,31 @@ func update(m Model, msg tea.Msg) Model {
 // printable character.
 func press(m Model, keys ...string) Model {
 	for _, k := range keys {
-		var msg tea.KeyPressMsg
-		switch k {
-		case "tab":
-			msg = tea.KeyPressMsg{Code: tea.KeyTab}
-		case "shift+tab":
-			msg = tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
-		case "enter":
-			msg = tea.KeyPressMsg{Code: tea.KeyEnter}
-		case "esc":
-			msg = tea.KeyPressMsg{Code: tea.KeyEscape}
-		case "up":
-			msg = tea.KeyPressMsg{Code: tea.KeyUp}
-		case "down":
-			msg = tea.KeyPressMsg{Code: tea.KeyDown}
-		case "ctrl+s":
-			msg = tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}
-		default:
-			r := []rune(k)[0]
-			msg = tea.KeyPressMsg{Code: r, Text: k}
-		}
-		m = update(m, msg)
+		m = update(m, keyPress(k))
 	}
 	return m
+}
+
+func keyPress(k string) tea.KeyPressMsg {
+	switch k {
+	case "tab":
+		return tea.KeyPressMsg{Code: tea.KeyTab}
+	case "shift+tab":
+		return tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift}
+	case "enter":
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
+	case "esc":
+		return tea.KeyPressMsg{Code: tea.KeyEscape}
+	case "up":
+		return tea.KeyPressMsg{Code: tea.KeyUp}
+	case "down":
+		return tea.KeyPressMsg{Code: tea.KeyDown}
+	case "ctrl+s":
+		return tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}
+	case "ctrl+c":
+		return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
+	}
+	return tea.KeyPressMsg{Code: []rune(k)[0], Text: k}
 }
 
 // Enter walks the fields and on through the sections, but only ctrl+s saves.
@@ -288,5 +301,89 @@ func TestVAAPISpeedShowsUnderItsGPU(t *testing.T) {
 	}
 	if i := slices.Index(keys, "slots2"); i < 0 || i+1 >= len(keys) || keys[i+1] != "vaapiPreset" {
 		t.Errorf("fields %q; want vaapiPreset right after the Arc", keys)
+	}
+}
+
+// Saving changes only what the screen changed, so what changed elsewhere
+// while it was open, such as the web UI's password and watched folders,
+// stays changed.
+func TestSavingKeepsChangesMadeElsewhere(t *testing.T) {
+	m, q := newTestModel(t)
+	m = press(m, "s")
+	elsewhere := q.settings
+	elsewhere.WebPassword = "hash"
+	elsewhere.Watch = []encode.WatchFolder{{Path: t.TempDir(), Kind: encode.FolderMovies}}
+	if err := config.Save(elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	q.settings = elsewhere // as a daemon tells the UI
+
+	m.draft.crf = "28"
+	m = press(m, "ctrl+s")
+	saved, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range map[string]encode.Settings{"saved": saved, "applied": q.settings} {
+		if s.CRF != 28 || s.WebPassword != "hash" || !slices.Equal(s.Watch, elsewhere.Watch) {
+			t.Errorf("%s CRF %d, password %q, folders %v; want 28 and what was changed elsewhere",
+				name, s.CRF, s.WebPassword, s.Watch)
+		}
+	}
+}
+
+// Every setting is either edited in a section, or one the screen leaves
+// alone, so none is left out of saving.
+func TestEverySettingIsInASectionOrLeftAlone(t *testing.T) {
+	leftAlone := []string{"WorkerListen", "WorkerDir", "WebListen", "WebPassword"}
+	typ := reflect.TypeFor[encode.Settings]()
+	for i := range typ.NumField() {
+		name := typ.Field(i).Name
+		if _, ok := sectionOf[name]; ok == slices.Contains(leftAlone, name) {
+			t.Errorf("%s should be in one of sectionOf and the settings the screen leaves alone", name)
+		}
+	}
+}
+
+// A value that only the settings' own checks catch opens its section.
+func TestInvalidSettingsOpenTheirSection(t *testing.T) {
+	m, q := newTestModel(t)
+	q.devices = testDevices
+	m = press(m, "s")
+	m.draft.slots[1] = encode.MaxSlots + 1
+	m = press(m, "ctrl+s")
+	if m.screen != screenSettings || m.section != sectionEncoders || q.saves != 0 {
+		t.Errorf("screen %d, section %d, %d saves; want the Encoders section open and nothing saved",
+			m.screen, m.section, q.saves)
+	}
+}
+
+// The screen takes the language codes the encoder does, and no others.
+func TestLanguageCodesAreThoseTheEncoderTakes(t *testing.T) {
+	for code, ok := range map[string]bool{"eng": true, "EN": true, " fr ": true,
+		"é": false, "日本": false, "e1": false, "e": false, "engl": false} {
+		s := encode.DefaultSettings()
+		s.Language = strings.ToLower(strings.TrimSpace(code))
+		if (validateLanguage(code) == nil) != ok || (s.Validate() == nil) != ok {
+			t.Errorf("%q: the screen says %v and the encoder %v; want both to accept it: %v",
+				code, validateLanguage(code), s.Validate(), ok)
+		}
+	}
+}
+
+// Recommended leaves what to do with videos already in a folder as it was,
+// so neither choice is marked as the recommended one.
+func TestWatchExistingIsntRecommendedBothWays(t *testing.T) {
+	m, _ := newTestModel(t)
+	m = press(m, "s", "shift+tab")
+	marked := 0
+	for _, existing := range []bool{false, true} {
+		m.draft.WatchExisting = existing
+		if view, _ := m.foldersView(200); strings.Contains(view, "(recommended)") {
+			marked++
+		}
+	}
+	if marked > 1 {
+		t.Error("both choices are marked as recommended")
 	}
 }

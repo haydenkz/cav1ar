@@ -1,10 +1,14 @@
 package remote
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 
@@ -41,11 +45,16 @@ type conn struct {
 // Serve starts sharing q, whose folders w watches.
 func Serve(q *encode.Queue, w *encode.Watcher) (*Server, error) {
 	path := SocketPath()
-	if c, err := net.Dial("unix", path); err == nil {
-		c.Close()
-		return nil, errors.New("another cav1ar daemon is already listening at " + path)
+	switch err := checkOwner(path); {
+	case err == nil:
+		if c, err := net.Dial("unix", path); err == nil {
+			c.Close()
+			return nil, errors.New("another cav1ar daemon is already listening at " + path)
+		}
+		os.Remove(path) // left behind by a daemon that stopped abruptly
+	case !errors.Is(err, fs.ErrNotExist):
+		return nil, err
 	}
-	os.Remove(path) // left behind by a daemon that stopped abruptly
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		return nil, err
@@ -82,7 +91,7 @@ func (s *Server) accept() {
 			jobs[i] = toWire(j)
 		}
 		settings := s.settings
-		s.queueLocked(c, message{Jobs: jobs, Logs: s.logs, Settings: &settings})
+		s.queueLocked(c, message{Version: protocol, Jobs: jobs, Logs: s.logs, Settings: &settings})
 		s.clients[c] = true
 		s.mu.Unlock()
 		go s.write(c)
@@ -99,33 +108,61 @@ func (s *Server) write(c *conn) {
 	}
 }
 
-// read carries out what a UI asks for.
+// read carries out what a UI asks for, telling it why when it can't. A UI
+// that sends more than a request could be is disconnected.
 func (s *Server) read(c *conn) {
-	dec := json.NewDecoder(c)
-	for {
+	sc := bufio.NewScanner(c)
+	sc.Buffer(nil, maxRequest)
+	for sc.Scan() {
 		var r request
-		if err := dec.Decode(&r); err != nil {
-			s.drop(c)
-			return
+		err := json.Unmarshal(sc.Bytes(), &r)
+		if err == nil {
+			err = s.do(r)
+		} else {
+			err = fmt.Errorf("the cav1ar daemon can't read that request: %w", err)
 		}
-		switch r.Op {
-		case "add":
-			s.q.Add(r.Path)
-		case "cancel":
-			s.q.Cancel(r.ID)
-		case "retry":
-			s.q.Retry(r.ID)
-		case "pause":
-			s.q.SetPaused(r.Paused)
-			s.mu.Lock()
-			s.sendLocked(message{}) // tell every UI
-			s.mu.Unlock()
-		case "hold":
-			s.q.SetHolding(r.Holding)
-			s.mu.Lock()
-			s.sendLocked(message{})
-			s.mu.Unlock()
+		if err != nil {
+			s.tell(c, err)
 		}
+	}
+	s.drop(c)
+}
+
+// do carries out a request, or says why it can't.
+func (s *Server) do(r request) error {
+	switch r.Op {
+	case "add":
+		if !filepath.IsAbs(r.Path) {
+			return fmt.Errorf("the cav1ar daemon needs a full path, not %q, since it doesn't know which folder that's in", r.Path)
+		}
+		s.q.Add(r.Path)
+	case "cancel":
+		s.q.Cancel(r.ID)
+	case "retry":
+		s.q.Retry(r.ID)
+	case "pause":
+		s.q.SetPaused(r.Paused)
+		s.mu.Lock()
+		s.sendLocked(message{}) // tell every UI
+		s.mu.Unlock()
+	case "hold":
+		s.q.SetHolding(r.Holding)
+		s.mu.Lock()
+		s.sendLocked(message{})
+		s.mu.Unlock()
+	default:
+		return fmt.Errorf("the cav1ar daemon doesn't know how to %q, so it must be a different version; restart it", r.Op)
+	}
+	return nil
+}
+
+// tell sends one UI why the daemon didn't do what it asked, unless the UI
+// has gone.
+func (s *Server) tell(c *conn, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.clients[c] {
+		s.queueLocked(c, message{Error: err.Error()})
 	}
 }
 

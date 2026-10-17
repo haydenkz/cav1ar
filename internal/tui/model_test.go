@@ -1,12 +1,54 @@
 package tui
 
 import (
+	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/haydenkz/cav1ar/internal/encode"
 )
+
+// Quitting while the UI's own queue encodes asks first, by ctrl+c as by q,
+// and pressing the key again quits.
+func TestQuittingWhileEncodingAsksFirst(t *testing.T) {
+	for _, k := range []string{"q", "ctrl+c"} {
+		m, _ := newTestModel(t)
+		m.apply([]encode.Event{{Job: encode.Job{ID: 0, Input: "/films/a.mkv", State: encode.Running}}})
+		next, cmd := m.Update(keyPress(k))
+		if m = next.(Model); cmd != nil || m.confirmQuit != k {
+			t.Fatalf("%s quit with an encode running, without asking", k)
+		}
+		if _, cmd = m.Update(keyPress(k)); cmd == nil {
+			t.Fatalf("%s pressed again didn't quit", k)
+		}
+		if _, ok := cmd().(tea.QuitMsg); !ok {
+			t.Errorf("%s pressed again didn't quit", k)
+		}
+	}
+}
+
+// A request that fails says why rather than seeming to work, and once the
+// daemon has gone, requests are refused.
+func TestRequestsThatFailSaySo(t *testing.T) {
+	m, q := newTestModel(t)
+	q.fail = errors.New("the cav1ar daemon has gone")
+	m = press(m, "p")
+	if m.holding || !strings.Contains(m.status, "has gone") || !m.statusBad {
+		t.Errorf("holding %v, status %q; want the failure shown and nothing changed", m.holding, m.status)
+	}
+
+	m.lost = true
+	for _, k := range []string{"p", "P", "a", "x", "r"} {
+		m.status = ""
+		if m = press(m, k); m.status != lostStatus || m.screen != screenQueue || q.holding {
+			t.Errorf("%s with the daemon gone: status %q, screen %d; want it refused", k, m.status, m.screen)
+		}
+	}
+}
 
 func TestRowsAreInTheOrderJobsRun(t *testing.T) {
 	at := time.Now()

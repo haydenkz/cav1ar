@@ -101,10 +101,10 @@ func (m Model) header() string {
 func (m Model) footer() string {
 	var s string
 	switch {
-	case m.confirmQuit:
+	case m.confirmQuit != "":
 		n := m.count(encode.Running)
 		s = m.st.warnText.Render(fmt.Sprintf(
-			"%d %s still running. Press q again to cancel and quit.", n, plural(n, "encode", "encodes")))
+			"%d %s still running. Press %s again to cancel and quit.", n, plural(n, "encode", "encodes"), m.confirmQuit))
 	case m.confirmDiscard:
 		s = m.st.warnText.Render("You have unsaved changes. Press esc again to discard them, or ctrl+s to save.")
 	case m.status != "" && m.statusBad:
