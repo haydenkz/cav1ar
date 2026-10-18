@@ -2,7 +2,7 @@
 
 What changes in each release of cav1ar.
 
-## Unreleased
+## v0.1.0 - 2026-10-18
 
 The first release. cav1ar batch-encodes video to AV1, or watches a library
 and keeps every file in it encoded the way you like.
