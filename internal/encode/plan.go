@@ -632,7 +632,9 @@ func (p *plan) action() Action {
 // video and audio to one file and the subtitles and attachments to another,
 // and the remuxing pass puts them together with the flags and tags the
 // settings want, or joins them onto the preroll. If the encoding pass still
-// cuts the audio short, a pass of its own encodes the audio again first.
+// cuts the audio short, a pass of its own encodes the audio again first, and
+// if the subtitles run on past the end of the video and audio, another cuts
+// them off there.
 
 // inputArgs opens the source for a pass that reads it, cutting off any
 // preroll it starts with. beforeInput are the video decoder's options.
@@ -739,6 +741,28 @@ func (p *plan) audioArgs(out string) []string {
 	}
 	args = append(args, p.audioCodecArgs()...)
 	return append(args, "-map_chapters", "-1", "-max_muxing_queue_size", "4096", "-f", "matroska", out)
+}
+
+// trimSideArgs is the ffmpeg command line for a pass that copies side, the
+// encoding pass's subtitles and attachments, into out with the subtitles cut
+// off at length, where the video and audio end. A source's subtitles can run
+// far past that, which would stretch the result to match; see longestPlayed.
+// Cues that start after length are dropped and ones that run past it are
+// shortened. -t only limits subtitles as an output option, and -copyts keeps
+// the cues where they are: without it ffmpeg moves them back by the time of
+// the first, in a file that has attachments.
+func (p *plan) trimSideArgs(out, side string, length time.Duration) []string {
+	return []string{"-hide_banner", "-nostdin", "-nostats", "-y", "-progress", "pipe:1", "-copyts", "-i", side,
+		"-map", "0", "-c", "copy", "-bsf:s", clipCues(length), "-t", seconds6(length),
+		"-map_chapters", "-1", "-max_muxing_queue_size", "4096", "-f", "matroska", out}
+}
+
+// clipCues is the bitstream filter that ends a subtitle cue at length if it
+// runs past it, and leaves the cues that don't. Times are in the stream's
+// time base, TB seconds to the tick, so length is divided by it.
+func clipCues(length time.Duration) string {
+	end := seconds6(length) + "/TB"
+	return "setts=duration='if(gt(PTS+DURATION," + end + "),max(0," + end + "-PTS),DURATION)'"
 }
 
 // remuxArgs is the ffmpeg command line for the remuxing pass, which copies
