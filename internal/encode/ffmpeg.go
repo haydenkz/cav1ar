@@ -364,17 +364,22 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 		return err
 	}
 
-	// The audio can still stop early, in which case encode it again on its
-	// own. Video that stops early can't be helped that way, so leave it for
-	// the result's checks to turn down.
-	var audio string
-	if len(p.audio) > 0 {
-		info, err := probe(ctx, av)
-		if err != nil {
+	// The encoding pass's file is read to check its audio, which can still
+	// stop early, and for how long the picture and sound run, to cut the
+	// subtitles at.
+	var avInfo mediaInfo
+	if len(p.audio) > 0 || p.hasSide() {
+		if avInfo, err = probe(ctx, av); err != nil {
 			return fmt.Errorf("the encoding pass's file couldn't be read: %w", err)
 		}
+	}
+	// If the audio stops early, encode it again on its own. Video that stops
+	// early can't be helped that way, so leave it for the result's checks to
+	// turn down.
+	var audio string
+	if len(p.audio) > 0 {
 		var short *shortStream
-		if err := checkStreamLengths(info, p); errors.As(err, &short) && short.kind == "audio" {
+		if err := checkStreamLengths(avInfo, p); errors.As(err, &short) && short.kind == "audio" {
 			u.log("cav1ar: the encoding pass's " + strings.TrimPrefix(short.Error(), "its ") +
 				", so encoding the audio again on its own")
 			if audio, done, err = intermediate(); err != nil {
@@ -391,6 +396,12 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 
 	u.step("putting together")
 	u.stage(p.assembling())
+	if p.hasSide() {
+		if side, done, err = trimSide(ctx, p, side, avInfo, audio, intermediate, run, u); err != nil {
+			return err
+		}
+		defer done()
+	}
 	var added time.Duration // how long the preroll put ahead of the result runs
 	if p.settings.Preroll == "" {
 		err = run(p.remuxArgs(tmp, av, audio, side), frameRate(p.video))
@@ -411,6 +422,57 @@ func encodeAndRemux(ctx context.Context, p *plan, action Action, tmp, work strin
 		}
 	}
 	return nil
+}
+
+// trimSide cuts the subtitles in side off where the video and audio end, and
+// returns the file to put the result together from, with a function that
+// removes it: a new one, or side itself if no subtitle runs far past the end.
+// A source's subtitles can run on for an hour or more, and the result would
+// run as long as they do. av is what the encoding pass's file holds, and
+// audio is the audio pass's file, if there was one.
+func trimSide(ctx context.Context, p *plan, side string, av mediaInfo, audio string,
+	intermediate func() (string, func(), error), run func([]string, float64) error, u updates) (string, func(), error) {
+	nothing := func() {}
+	// Cutting the subtitles only tidies up, so where it can't be done keep
+	// them as they are, rather than fail a job that has come this far.
+	keep := func(err error) (string, func(), error) {
+		if ctx.Err() != nil {
+			return "", nil, ctx.Err()
+		}
+		u.log("cav1ar: couldn't cut the subtitles at the end of the video, so keeping them as they are: " + err.Error())
+		return side, nothing, nil
+	}
+	length := longestPlayed(av.Streams)
+	if audio != "" {
+		info, err := probe(ctx, audio)
+		if err != nil {
+			return keep(fmt.Errorf("the audio pass's file couldn't be read: %w", err))
+		}
+		length = max(length, longestPlayed(info.Streams))
+	}
+	if length == 0 { // the files don't say how long they run
+		return side, nothing, nil
+	}
+	info, err := probe(ctx, side)
+	if err != nil {
+		return keep(err)
+	}
+	// A cue that ends a moment after the video does no harm, so only a clear
+	// overrun is worth a pass.
+	if info.Duration-length <= time.Second {
+		return side, nothing, nil
+	}
+	trimmed, done, err := intermediate()
+	if err != nil {
+		return keep(err)
+	}
+	if err := run(p.trimSideArgs(trimmed, side, length), 0); err != nil {
+		done()
+		return keep(err)
+	}
+	u.log(fmt.Sprintf("cav1ar: the subtitles ran to %s, past the end of the video, so cut them off at %s",
+		info.Duration.Round(time.Second), length.Round(time.Second)))
+	return trimmed, done, nil
 }
 
 // runFFmpeg runs ffmpeg, reporting its progress and output as it goes. rate

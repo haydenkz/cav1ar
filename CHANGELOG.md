@@ -2,6 +2,14 @@
 
 What changes in each release of cav1ar.
 
+## Unreleased
+
+### Fixes
+
+- Subtitles that run past the end of the video, such as an advert cue that
+  lasts an hour, are cut off there, so a result no longer runs on for as
+  long as they do after the video has ended
+
 ## v0.1.0 - 2026-10-18
 
 The first release. cav1ar batch-encodes video to AV1, or watches a library

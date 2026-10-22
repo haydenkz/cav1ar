@@ -219,7 +219,9 @@ that have started, then the rest by priority, those up next first.
 Each job reads the original once, encoding the video and audio to one file
 and copying the subtitles and attachments to another on local disk, then
 puts them together in a quick remux. If the audio comes out short, which
-ffmpeg can do without saying so, it is encoded again on its own.
+ffmpeg can do without saying so, it is encoded again on its own. Subtitles
+that run on past the end of the video, as some sources' do by up to an hour,
+are cut off there first, so the result doesn't run as long as they do.
 
 Results are written to a hidden file next to the original, and only take its
 place once every track is checked to run its full length. With Settings →
