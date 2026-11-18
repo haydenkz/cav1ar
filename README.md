@@ -23,7 +23,7 @@ keep every file in it encoded the way you like.
 
 ## Install
 
-Needs Linux, Go 1.27.2+, and ffmpeg built with `libsvtav1` and `libopus`.
+Needs Linux, Go 1.27.4+, and ffmpeg built with `libsvtav1` and `libopus`.
 MKVToolNix (`mkvpropedit` and `mkvextract`) is optional: with it, fixing a
 file's metadata takes a moment instead of a rewrite of the whole file.
 
