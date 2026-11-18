@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # One weekly pull request for every Go module update, so the tests run
+  # once for all of them. Only the modules go.mod requires directly are
+  # offered; the indirect ones move with them (modernc.org/libc has to stay
+  # at the version modernc.org/sqlite pins, so it can't move on its own).
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ['*']
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+  # The Dockerfile's golang image. debian:bookworm-slim is a release name,
+  # not a version, so moving to a newer Debian is done by hand.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
